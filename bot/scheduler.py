@@ -40,10 +40,15 @@ def matches_rule(rule: dict, d: date) -> bool:
         return False
 
 
-def run_daily_schedules(force_date: date | None = None) -> dict:
+def run_daily_schedules(
+    force_date: date | None = None,
+    *,
+    force_resend: bool = False,
+) -> dict:
     """
     今日（JST）に該当する予定を送り、結果を返す。
     force_date を渡すとテスト用にその日扱いにできる。
+    force_resend=True で「送済み」を無視して再送できる（テスト用）。
     """
     d = force_date or today_jst()
     year_month = f"{d.year:04d}-{d.month:02d}"
@@ -58,6 +63,7 @@ def run_daily_schedules(force_date: date | None = None) -> dict:
             "ok": False,
             "error": "LINE_GROUP_ID が未設定です。グループでBOTにメッセージを送り、ログの groupId を .env に書いてください。",
             "date": d.isoformat(),
+            "group_id": None,
             "results": results,
         }
 
@@ -70,7 +76,7 @@ def run_daily_schedules(force_date: date | None = None) -> dict:
             results.append({"id": sid, "title": title, "status": "skip_not_today"})
             continue
 
-        if already_sent(sid, year_month):
+        if not force_resend and already_sent(sid, year_month):
             results.append({"id": sid, "title": title, "status": "skip_already_sent"})
             continue
 
@@ -81,10 +87,17 @@ def run_daily_schedules(force_date: date | None = None) -> dict:
         try:
             push_text(group_id, text)
             mark_sent(sid, year_month)
-            log.info("sent schedule %s for %s", sid, year_month)
+            log.info("sent schedule %s for %s to %s", sid, year_month, group_id)
             results.append({"id": sid, "title": title, "status": "sent"})
         except Exception as e:
             log.exception("failed to send %s", sid)
             results.append({"id": sid, "title": title, "status": "error", "error": str(e)})
 
-    return {"ok": True, "date": d.isoformat(), "year_month": year_month, "results": results}
+    return {
+        "ok": True,
+        "date": d.isoformat(),
+        "year_month": year_month,
+        "group_id": group_id,
+        "force_resend": force_resend,
+        "results": results,
+    }

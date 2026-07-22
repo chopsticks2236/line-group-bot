@@ -119,7 +119,8 @@ def cron_daily():
     外部Cron（cron-job.org など）から毎日叩く。
     Header: X-Cron-Secret: <CRON_SECRET>
     または ?secret=
-    テスト: ?date=2026-04-18
+    テスト: ?date=2026-04-15
+    再送テスト: ?date=2026-04-15&force=1
     """
     secret = request.headers.get("X-Cron-Secret") or request.args.get("secret", "")
     if secret != config.CRON_SECRET:
@@ -130,7 +131,9 @@ def cron_daily():
     if raw:
         force = date.fromisoformat(raw)
 
-    result = run_daily_schedules(force_date=force)
+    force_resend = request.args.get("force", "").strip() in ("1", "true", "yes")
+
+    result = run_daily_schedules(force_date=force, force_resend=force_resend)
     log.info("cron result: %s", result)
     return jsonify(result)
 
