@@ -21,7 +21,11 @@ services:
         sync: false
       - key: CRON_SECRET
         sync: false
-      - key: XAI_API_KEY
+      - key: OPENAI_API_KEY
         sync: false
-      - key: XAI_MODEL
-        value: grok-4.5
+      - key: OPENAI_MODEL
+        value: gpt-5.6-luna
+      - key: OPENAI_VECTOR_STORE_ID
+        sync: false
+      - key: ADMIN_LINE_USER_ID
+        sync: false
