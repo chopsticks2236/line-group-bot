@@ -26,9 +26,12 @@ LINE_CHANNEL_ACCESS_TOKEN = _env("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = _env("LINE_CHANNEL_SECRET")
 LINE_GROUP_ID = _env("LINE_GROUP_ID")
 
-XAI_API_KEY = _env("XAI_API_KEY")
-XAI_MODEL = _env("XAI_MODEL", "grok-4.5")
-XAI_BASE_URL = _env("XAI_BASE_URL", "https://api.x.ai/v1")
+OPENAI_API_KEY = _env("OPENAI_API_KEY")
+OPENAI_MODEL = _env("OPENAI_MODEL", "gpt-5.6-luna")
+OPENAI_VECTOR_STORE_ID = _env("OPENAI_VECTOR_STORE_ID")
+
+# 設定変更を許可する管理者のLINE userId。表示名では判定しない。
+ADMIN_LINE_USER_ID = _env("ADMIN_LINE_USER_ID")
 
 CRON_SECRET = _env("CRON_SECRET", "change-me")
 PORT = int(_env("PORT", "8000") or "8000")
@@ -44,4 +47,4 @@ def has_line_credentials() -> bool:
 
 
 def has_ai_key() -> bool:
-    return bool(XAI_API_KEY)
+    return bool(OPENAI_API_KEY)

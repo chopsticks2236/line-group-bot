@@ -1,4 +1,4 @@
-"""会話ログを踏まえた AI 返答（xAI / SpaceXAI）"""
+"""会話ログとVector Storeを踏まえたOpenAI返答。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from bot import config
+from bot.db import delete_setting, get_setting, set_setting
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,70 @@ BOT_CALL_PATTERNS = (
     "bot",
     "ボット",
 )
+
+NON_ADMIN_SETTING_REPLY = (
+    "ご主人様が設定を管理してるから、それはできないの😭\n"
+    "変更したいときはご主人様にお願いしてみてね。"
+)
+
+
+def is_admin_user(user_id: str | None) -> bool:
+    """表示名ではなく、Renderに登録したLINE userIdで管理者を判定する。"""
+    return bool(user_id and config.ADMIN_LINE_USER_ID and user_id == config.ADMIN_LINE_USER_ID)
+
+
+def is_setting_request(text: str) -> bool:
+    """設定変更らしい命令を検出する（非管理者からの変更を事前に拒否）。"""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"(?:設定|通知|口調|キャラ|ルール).*(?:変え|変更|切って|切っといて|オフ|オン|止め|消して|覚えて|忘れて)",
+            t,
+            flags=re.IGNORECASE,
+        )
+        or re.search(r"(?:設定|通知|口調|キャラ|ルール)を.*(?:して|変えて|変更して)", t)
+    )
+
+
+def apply_setting_command(text: str, user_id: str | None) -> str | None:
+    """管理者の設定コマンドを保存し、返答文を返す。通常の質問ならNone。"""
+    if not is_setting_request(text) and not re.search(
+        r"設定(?:確認|リセット|初期化)?|(?:口調|キャラ)(?:を|は|に)", text or ""
+    ):
+        return None
+    if not is_admin_user(user_id):
+        return NON_ADMIN_SETTING_REPLY
+
+    t = (text or "").strip()
+    if re.search(r"設定(?:確認|状況|を見る|を確認)", t) or t in {"設定", "設定確認"}:
+        reply_mode = "メンション時だけ返信" if get_setting("reply_only_when_mentioned", "1") == "1" else "質問文にも返信"
+        style = get_setting("style_hint", "標準")
+        return f"現在の設定だよ✨\n返信: {reply_mode}\n口調メモ: {style}"
+
+    if re.search(r"設定(?:リセット|初期化)|設定を忘れて", t):
+        delete_setting("reply_only_when_mentioned")
+        delete_setting("style_hint")
+        return "設定を初期化したよ✨"
+
+    if re.search(r"(?:通知|返信).*(?:オフ|OFF|切って|切っといて|止めて)|メンション(?:のみ|だけ)", t, re.IGNORECASE):
+        set_setting("reply_only_when_mentioned", "1")
+        return "了解、メンションされた時だけ返事するね✨"
+
+    if re.search(r"(?:通知|返信).*(?:オン|ON|つけて|再開)|(?:自動返信|質問にも返信)", t, re.IGNORECASE):
+        set_setting("reply_only_when_mentioned", "0")
+        return "了解、質問文にも返事する設定にしたよ✨"
+
+    style_match = re.search(r"(?:口調|キャラ)(?:を|は|に)?\s*(?:もっと)?(.+)", t)
+    if style_match:
+        style = style_match.group(1).strip()
+        style = re.sub(r"(?:にして|に変更|へ変更|でお願い|で)$", "", style).strip()
+        if style:
+            set_setting("style_hint", style[:500])
+            return f"口調メモを「{style[:100]}」に更新したよ✨"
+
+    return "設定できるのは「通知オフ」「通知オン」「口調を明るく」「設定確認」「設定リセット」だよ。"
 
 
 def should_reply(
@@ -76,37 +141,55 @@ def build_log_block(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "（ログなし）"
 
 
-def generate_reply(question: str, log_messages: list[dict[str, Any]], system_prompt: str) -> str:
+def generate_reply(
+    question: str,
+    log_messages: list[dict[str, Any]],
+    system_prompt: str,
+    *,
+    user_id: str | None = None,
+) -> str:
     if not config.has_ai_key():
         return (
             "AIキーが未設定のため自動回答できません。\n"
-            "管理者は .env の XAI_API_KEY を設定してください。\n"
-            "（https://console.x.ai で取得）\n\n"
+            "管理者はRenderのOPENAI_API_KEYを設定してください。\n\n"
             "手動のヒント: /q のあとに質問、またはBOTをメンションしてください。"
         )
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=config.XAI_API_KEY, base_url=config.XAI_BASE_URL)
+    client = OpenAI(api_key=config.OPENAI_API_KEY)
     log_block = build_log_block(log_messages)
+    requester = "ご主人様（管理者）" if is_admin_user(user_id) else "グループメンバー"
+    style_hint = get_setting("style_hint")
+    if style_hint:
+        system_prompt = f"{system_prompt}\n\n【ご主人様が設定した口調メモ】\n{style_hint}"
+
     user_content = (
         f"【会話ログ】\n{log_block}\n\n"
+        f"【質問者】\n{requester}\n\n"
         f"【今回の質問】\n{question}\n\n"
-        "上記を踏まえて回答してください。"
+        "会話ログを最優先に参照し、必要な場合だけVector Storeのファイル検索結果も使って回答してください。"
     )
 
     try:
-        # chat.completions は互換性が高く安定
-        resp = client.chat.completions.create(
-            model=config.XAI_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.3,
+        tools: list[dict[str, Any]] = []
+        if config.OPENAI_VECTOR_STORE_ID:
+            tools.append(
+                {
+                    "type": "file_search",
+                    "vector_store_ids": [config.OPENAI_VECTOR_STORE_ID],
+                    "max_num_results": 5,
+                }
+            )
+
+        resp = client.responses.create(
+            model=config.OPENAI_MODEL,
+            instructions=system_prompt,
+            input=user_content,
+            tools=tools,
         )
-        answer = (resp.choices[0].message.content or "").strip()
+        answer = (resp.output_text or "").strip()
         return answer or "回答を生成できませんでした。"
     except Exception as e:
         log.exception("AI reply failed")
-        return f"AI回答中にエラーが起きました: {e}"
+        return "ごめん、今はうまく答えられないみたい。少し待ってからもう一度呼んでね。"

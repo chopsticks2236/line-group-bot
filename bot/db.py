@@ -50,8 +50,37 @@ def init_db() -> None:
                 sent_at TEXT NOT NULL,
                 UNIQUE(schedule_id, year_month)
             );
+
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    with get_db() as conn:
+        row = conn.execute("SELECT value FROM bot_settings WHERE key = ?", (key,)).fetchone()
+    return str(row["value"]) if row else default
+
+
+def set_setting(key: str, value: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO bot_settings (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            """,
+            (key, value, now),
+        )
+
+
+def delete_setting(key: str) -> None:
+    with get_db() as conn:
+        conn.execute("DELETE FROM bot_settings WHERE key = ?", (key,))
 
 
 def save_message(

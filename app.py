@@ -17,8 +17,8 @@ from linebot.v3.messaging import Configuration
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 
 from bot import config
-from bot.ai_reply import clean_question, generate_reply, should_reply
-from bot.db import init_db, recent_messages, save_message
+from bot.ai_reply import apply_setting_command, clean_question, generate_reply, should_reply
+from bot.db import get_setting, init_db, recent_messages, save_message
 from bot.line_api import extract_source, get_profile_name, reply_text
 from bot.scheduler import run_daily_schedules
 
@@ -183,7 +183,10 @@ def _register_message_handler():
         )
 
         msgs_cfg = config.load_messages().get("ai", {})
-        only_mention = bool(msgs_cfg.get("reply_only_when_mentioned", True))
+        default_only_mention = bool(msgs_cfg.get("reply_only_when_mentioned", True))
+        only_mention = get_setting(
+            "reply_only_when_mentioned", "1" if default_only_mention else "0"
+        ) == "1"
         max_logs = int(msgs_cfg.get("max_log_messages", 40))
         system_prompt = msgs_cfg.get("system_prompt") or "簡潔に日本語で答えてください。"
 
@@ -206,9 +209,25 @@ def _register_message_handler():
             return
 
         question = clean_question(text)
+        setting_answer = apply_setting_command(question, user_id)
+        if setting_answer is not None:
+            log.info("setting command handled: user_id=%s question=%s", user_id, question[:80])
+            try:
+                reply_text(event.reply_token, setting_answer)
+                save_message(
+                    source_type=source_type,
+                    source_id=source_id,
+                    user_id="bot",
+                    display_name="かめ子",
+                    text=setting_answer,
+                )
+            except Exception:
+                log.exception("setting reply failed")
+            return
+
         logs = recent_messages(source_type, source_id, limit=max_logs)
         log.info("AI generate start: question=%s logs=%s", question[:80], len(logs))
-        answer = generate_reply(question, logs, system_prompt)
+        answer = generate_reply(question, logs, system_prompt, user_id=user_id)
         log.info("AI generate done: answer=%s", (answer or "")[:120])
 
         try:
