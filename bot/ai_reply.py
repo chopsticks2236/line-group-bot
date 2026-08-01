@@ -83,7 +83,9 @@ def apply_setting_command(text: str, user_id: str | None) -> str | None:
             set_setting("style_hint", style[:500])
             return f"口調メモを「{style[:100]}」に更新したよ✨"
 
-    return "設定できるのは「通知オフ」「通知オン」「口調を明るく」「設定確認」「設定リセット」だよ。"
+    # 「設定」という単語を含む通常の質問までここで止めない。
+    # 対応している設定コマンドに一致しない場合は、AI回答へ処理を戻す。
+    return None
 
 
 def should_reply(
@@ -141,6 +143,45 @@ def build_log_block(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines) if lines else "（ログなし）"
 
 
+def search_vector_store(client: Any, question: str) -> tuple[str, bool]:
+    """質問に関連するVector Storeの断片を検索して、回答用の文脈に整形する。"""
+    if not config.OPENAI_VECTOR_STORE_ID:
+        return "（Vector Store未設定）", False
+
+    try:
+        results = client.vector_stores.search(
+            vector_store_id=config.OPENAI_VECTOR_STORE_ID,
+            query=question,
+            max_num_results=5,
+            rewrite_query=True,
+        )
+
+        snippets: list[str] = []
+        for result in getattr(results, "data", []) or []:
+            filename = getattr(result, "filename", None) or "アップロード資料"
+            texts: list[str] = []
+            for content in getattr(result, "content", []) or []:
+                if isinstance(content, dict):
+                    value = content.get("text", "")
+                else:
+                    value = getattr(content, "text", "")
+                if value:
+                    texts.append(str(value).strip())
+
+            joined = "\n".join(t for t in texts if t)
+            if joined:
+                snippets.append(f"【{filename}】\n{joined[:3000]}")
+
+        log.info("Vector Store search done: results=%s", len(snippets))
+        if not snippets:
+            return "（今回の質問に関連する検索結果なし）", True
+        return "\n\n".join(snippets), True
+    except Exception:
+        # 検索APIが一時的に失敗した場合は、下流のfile_searchツールへフォールバックする。
+        log.exception("Vector Store search failed; falling back to file_search tool")
+        return "（Vector Store検索APIが一時的に利用できません）", False
+
+
 def generate_reply(
     question: str,
     log_messages: list[dict[str, Any]],
@@ -159,6 +200,7 @@ def generate_reply(
 
     client = OpenAI(api_key=config.OPENAI_API_KEY)
     log_block = build_log_block(log_messages)
+    vector_context, vector_search_ok = search_vector_store(client, question)
     requester = "ご主人様（管理者）" if is_admin_user(user_id) else "グループメンバー"
     style_hint = get_setting("style_hint")
     if style_hint:
@@ -166,14 +208,16 @@ def generate_reply(
 
     user_content = (
         f"【会話ログ】\n{log_block}\n\n"
+        f"【Vector Store検索結果】\n{vector_context}\n\n"
         f"【質問者】\n{requester}\n\n"
         f"【今回の質問】\n{question}\n\n"
-        "会話ログを最優先に参照し、必要な場合だけVector Storeのファイル検索結果も使って回答してください。"
+        "会話ログを最優先に参照し、次にVector Store検索結果を使って回答してください。"
+        "どちらにも根拠がない場合は、推測せずご主人様（km）が答える旨を伝えてください。"
     )
 
     try:
         tools: list[dict[str, Any]] = []
-        if config.OPENAI_VECTOR_STORE_ID:
+        if config.OPENAI_VECTOR_STORE_ID and not vector_search_ok:
             tools.append(
                 {
                     "type": "file_search",
@@ -182,11 +226,16 @@ def generate_reply(
                 }
             )
 
+        request_args: dict[str, Any] = {
+            "model": config.OPENAI_MODEL,
+            "instructions": system_prompt,
+            "input": user_content,
+        }
+        if tools:
+            request_args["tools"] = tools
+
         resp = client.responses.create(
-            model=config.OPENAI_MODEL,
-            instructions=system_prompt,
-            input=user_content,
-            tools=tools,
+            **request_args,
         )
         answer = (resp.output_text or "").strip()
         return answer or "回答を生成できませんでした。"
