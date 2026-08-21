@@ -1,4 +1,4 @@
-"""指定日の自動メッセージ（毎月18日・月末）"""
+"""指定日の自動メッセージ（毎月15日・月末・周期予定）"""
 
 from __future__ import annotations
 
@@ -31,9 +31,27 @@ def is_last_day_of_month(d: date) -> bool:
 
 
 def matches_rule(rule: dict, d: date) -> bool:
+    start_raw = rule.get("start_date")
+    every_raw = rule.get("every_months")
+
+    if start_raw and every_raw:
+        try:
+            start = date.fromisoformat(str(start_raw))
+            every_months = int(every_raw)
+            day = int(rule.get("day", start.day))
+        except (TypeError, ValueError):
+            return False
+
+        if every_months <= 0 or d < start or d.day != day:
+            return False
+
+        month_delta = (d.year - start.year) * 12 + (d.month - start.month)
+        return month_delta % every_months == 0
+
     day = rule.get("day")
     if day == "last":
         return is_last_day_of_month(d)
+
     try:
         return int(day) == d.day
     except (TypeError, ValueError):
@@ -44,11 +62,13 @@ def run_daily_schedules(
     force_date: date | None = None,
     *,
     force_resend: bool = False,
+    force_time: str | None = None,
 ) -> dict:
     """
     今日（JST）に該当する予定を送り、結果を返す。
     force_date を渡すとテスト用にその日扱いにできる。
     force_resend=True で「送済み」を無視して再送できる（テスト用）。
+    force_time を渡すと、その時刻の予定だけを送る。
     """
     d = force_date or today_jst()
     year_month = f"{d.year:04d}-{d.month:02d}"
@@ -76,7 +96,12 @@ def run_daily_schedules(
             results.append({"id": sid, "title": title, "status": "skip_not_today"})
             continue
 
-        rule_time = str(rule.get("time") or "").strip()\n        if force_time is not None and rule_time and rule_time != force_time:\n            results.append({"id": sid, "title": title, "status": "skip_not_time"})\n            continue\n\n        if not force_resend and already_sent(sid, year_month):
+        rule_time = str(rule.get("time") or "").strip()
+        if force_time is not None and rule_time and rule_time != force_time:
+            results.append({"id": sid, "title": title, "status": "skip_not_time"})
+            continue
+
+        if not force_resend and already_sent(sid, year_month):
             results.append({"id": sid, "title": title, "status": "skip_already_sent"})
             continue
 
@@ -99,5 +124,6 @@ def run_daily_schedules(
         "year_month": year_month,
         "group_id": group_id,
         "force_resend": force_resend,
+        "force_time": force_time,
         "results": results,
     }
