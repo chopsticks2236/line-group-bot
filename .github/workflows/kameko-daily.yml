@@ -2,8 +2,8 @@ name: Kameko daily schedule
 
 on:
   schedule:
-    # 00:10 UTC = 09:10 JST
-    - cron: "10 0 * * *"
+    # 00:45 UTC = 09:45 JST
+    - cron: "45 0 * * *"
   workflow_dispatch:
     inputs:
       date:
