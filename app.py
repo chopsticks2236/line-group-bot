@@ -121,6 +121,7 @@ def cron_daily():
     または ?secret=
     テスト: ?date=2026-04-15
     再送テスト: ?date=2026-04-15&force=1
+    時刻指定: ?date=2026-04-15&time=09:45
     """
     secret = request.headers.get("X-Cron-Secret") or request.args.get("secret", "")
     if secret != config.CRON_SECRET:
@@ -132,8 +133,13 @@ def cron_daily():
         force = date.fromisoformat(raw)
 
     force_resend = request.args.get("force", "").strip() in ("1", "true", "yes")
+    force_time = request.args.get("time", "").strip() or None
 
-    result = run_daily_schedules(force_date=force, force_resend=force_resend)
+    result = run_daily_schedules(
+        force_date=force,
+        force_resend=force_resend,
+        force_time=force_time,
+    )
     log.info("cron result: %s", result)
     return jsonify(result)
 
