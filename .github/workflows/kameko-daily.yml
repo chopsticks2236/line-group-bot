@@ -4,6 +4,8 @@ on:
   schedule:
     # 00:45 UTC = 09:45 JST
     - cron: "45 0 * * *"
+    # 09:00 UTC = 18:00 JST
+    - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
       date:
@@ -15,6 +17,10 @@ on:
         required: false
         default: false
         type: boolean
+      time:
+        description: "テスト時刻（HH:MM）。通常運用は空欄"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -28,8 +34,16 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           DATE_INPUT: ${{ inputs.date }}
           FORCE_INPUT: ${{ inputs.force }}
+          TIME_INPUT: ${{ inputs.time }}
         run: |
           set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
+            case "${{ github.event.schedule }}" in
+              "45 0 * * *") TIME_INPUT="09:45" ;;
+              "0 9 * * *") TIME_INPUT="18:00" ;;
+            esac
+          fi
+
           if [ -z "${CRON_SECRET}" ]; then
             echo "CRON_SECRET is not configured in GitHub Secrets."
             exit 1
@@ -43,6 +57,9 @@ jobs:
           fi
           if [ "${FORCE_INPUT}" = "true" ]; then
             CURL_ARGS+=(--data-urlencode "force=1")
+          fi
+          if [ -n "${TIME_INPUT}" ]; then
+            CURL_ARGS+=(--data-urlencode "time=${TIME_INPUT}")
           fi
 
           curl --fail-with-body --silent --show-error --retry 3 --retry-delay 5 \
