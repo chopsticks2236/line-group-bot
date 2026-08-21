@@ -5,6 +5,8 @@ on:
     # 00:45 UTC = 09:45 JST
     - cron: "45 0 * * *"
     # 09:00 UTC = 18:00 JST
+    # 07:30 UTC = 16:30 JST
+    - cron: "30 7 * * *"
     - cron: "0 9 * * *"
   workflow_dispatch:
     inputs:
@@ -40,6 +42,7 @@ jobs:
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
             case "${{ github.event.schedule }}" in
               "45 0 * * *") TIME_INPUT="09:45" ;;
+              "30 7 * * *") TIME_INPUT="16:30" ;;
               "0 9 * * *") TIME_INPUT="18:00" ;;
             esac
           fi
