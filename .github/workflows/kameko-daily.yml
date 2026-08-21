@@ -5,6 +5,16 @@ on:
     # 00:10 UTC = 09:10 JST
     - cron: "10 0 * * *"
   workflow_dispatch:
+    inputs:
+      date:
+        description: "テスト日付（YYYY-MM-DD）。通常運用は空欄"
+        required: false
+        type: string
+      force:
+        description: "送済みでも再送する"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -16,12 +26,26 @@ jobs:
       - name: Trigger Render scheduler
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          DATE_INPUT: ${{ inputs.date }}
+          FORCE_INPUT: ${{ inputs.force }}
         run: |
           set -euo pipefail
           if [ -z "${CRON_SECRET}" ]; then
             echo "CRON_SECRET is not configured in GitHub Secrets."
             exit 1
           fi
+
+          ENDPOINT="https://line-group-bot-r3yl.onrender.com/cron/daily"
+          CURL_ARGS=()
+
+          if [ -n "${DATE_INPUT}" ]; then
+            CURL_ARGS+=(--data-urlencode "date=${DATE_INPUT}")
+          fi
+          if [ "${FORCE_INPUT}" = "true" ]; then
+            CURL_ARGS+=(--data-urlencode "force=1")
+          fi
+
           curl --fail-with-body --silent --show-error --retry 3 --retry-delay 5 \
+            --get "${CURL_ARGS[@]}" \
             -H "X-Cron-Secret: ${CRON_SECRET}" \
-            "https://line-group-bot-r3yl.onrender.com/cron/daily"
+            "${ENDPOINT}"
