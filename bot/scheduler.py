@@ -76,7 +76,7 @@ def run_daily_schedules(
             results.append({"id": sid, "title": title, "status": "skip_not_today"})
             continue
 
-        if not force_resend and already_sent(sid, year_month):
+        rule_time = str(rule.get("time") or "").strip()\n        if force_time is not None and rule_time and rule_time != force_time:\n            results.append({"id": sid, "title": title, "status": "skip_not_time"})\n            continue\n\n        if not force_resend and already_sent(sid, year_month):
             results.append({"id": sid, "title": title, "status": "skip_already_sent"})
             continue
 
