@@ -125,8 +125,10 @@ def run_daily_schedules(
             log.exception("failed to send %s", sid)
             results.append({"id": sid, "title": title, "status": "error", "error": str(e)})
 
+    has_errors = any(item.get("status") == "error" for item in results)
+
     return {
-        "ok": True,
+        "ok": not has_errors,
         "date": d.isoformat(),
         "year_month": year_month,
         "group_id": group_id,
