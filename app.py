@@ -141,7 +141,8 @@ def cron_daily():
         force_time=force_time,
     )
     log.info("cron result: %s", result)
-    return jsonify(result)
+    status_code = 200 if result.get("ok") else 502
+    return jsonify(result), status_code
 
 
 def _mention_user_ids(event: MessageEvent) -> list[str]:
