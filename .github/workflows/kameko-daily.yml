@@ -2,8 +2,8 @@ name: Kameko daily schedule
 
 on:
   schedule:
-    # Check four times per hour; Render sends only due, unsent messages.
-    - cron: "7,22,37,52 * * * *"
+    # Check every 5 minutes; Render sends only due, unsent messages.
+    - cron: "2-57/5 * * * *"
   workflow_dispatch:
     inputs:
       date:
@@ -57,4 +57,4 @@ jobs:
             CURL_ARGS+=(--data-urlencode "time=${TIME_INPUT}")
           fi
 
-          curl --fail-with-body --silent --show-error --retry 3 --retry-delay 5 --get "${CURL_ARGS[@]}" -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}"
+          curl --fail-with-body --silent --show-error --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 20 --max-time 180 --get "${CURL_ARGS[@]}" -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}"
