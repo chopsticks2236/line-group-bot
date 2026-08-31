@@ -69,8 +69,11 @@ def run_daily_schedules(
     force_date を渡すとテスト用にその日扱いにできる。
     force_resend=True で「送済み」を無視して再送できる（テスト用）。
     force_time を渡すと、その時刻の予定だけを送る。
+    force_time が未指定なら、現在時刻を過ぎた未送信予定を送る。
     """
-    d = force_date or today_jst()
+    now = datetime.now(JST)
+    d = force_date or now.date()
+    current_time = force_time or now.strftime("%H:%M")
     year_month = f"{d.year:04d}-{d.month:02d}"
     data = config.load_messages()
     rules = data.get("monthly", [])
@@ -97,9 +100,13 @@ def run_daily_schedules(
             continue
 
         rule_time = str(rule.get("time") or "").strip()
-        if force_time is not None and rule_time and rule_time != force_time:
-            results.append({"id": sid, "title": title, "status": "skip_not_time"})
-            continue
+        if rule_time:
+            if force_time is not None and rule_time != force_time:
+                results.append({"id": sid, "title": title, "status": "skip_not_time"})
+                continue
+            if force_time is None and current_time < rule_time:
+                results.append({"id": sid, "title": title, "status": "skip_not_time_yet"})
+                continue
 
         if not force_resend and already_sent(sid, year_month):
             results.append({"id": sid, "title": title, "status": "skip_already_sent"})
