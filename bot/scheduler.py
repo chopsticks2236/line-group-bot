@@ -132,5 +132,6 @@ def run_daily_schedules(
         "group_id": group_id,
         "force_resend": force_resend,
         "force_time": force_time,
+        "current_time": current_time,
         "results": results,
     }
