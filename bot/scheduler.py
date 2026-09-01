@@ -5,6 +5,7 @@ from __future__ import annotations
 import calendar
 import logging
 from datetime import date, datetime, timedelta, timezone
+from uuid import NAMESPACE_URL, uuid5
 
 from bot import config
 from bot.db import already_sent, mark_sent
@@ -58,6 +59,16 @@ def matches_rule(rule: dict, d: date) -> bool:
         return False
 
 
+def schedule_retry_key(group_id: str, schedule_id: str, scheduled_date: date) -> str:
+    """同じ予定・同じ日付のLINE送信を24時間以内に重複させないUUID。"""
+    return str(
+        uuid5(
+            NAMESPACE_URL,
+            f"line-group-bot:{group_id}:{schedule_id}:{scheduled_date.isoformat()}",
+        )
+    )
+
+
 def run_daily_schedules(
     force_date: date | None = None,
     *,
@@ -90,6 +101,30 @@ def run_daily_schedules(
             "results": results,
         }
 
+    not_before_raw = (data.get("scheduler") or {}).get("not_before")
+    if not_before_raw and not force_resend:
+        try:
+            not_before = date.fromisoformat(str(not_before_raw))
+        except ValueError:
+            return {
+                "ok": False,
+                "error": "scheduler.not_before の日付形式が不正です",
+                "date": d.isoformat(),
+                "group_id_set": True,
+                "results": results,
+            }
+        if d < not_before:
+            return {
+                "ok": True,
+                "date": d.isoformat(),
+                "year_month": year_month,
+                "group_id_set": True,
+                "force_resend": force_resend,
+                "force_time": force_time,
+                "current_time": current_time,
+                "results": [{"status": "skip_before_activation"}],
+            }
+
     for rule in rules:
         sid = rule.get("id") or f"day_{rule.get('day')}"
         title = rule.get("title", sid)
@@ -117,10 +152,16 @@ def run_daily_schedules(
             continue
 
         try:
-            push_text(group_id, text)
+            retry_key = None if force_resend else schedule_retry_key(group_id, sid, d)
+            push_status = push_text(group_id, text, retry_key=retry_key)
             mark_sent(sid, year_month)
-            log.info("sent schedule %s for %s to %s", sid, year_month, group_id)
-            results.append({"id": sid, "title": title, "status": "sent"})
+            if push_status == "already_accepted":
+                log.info("schedule %s for %s was already accepted by LINE", sid, year_month)
+                status = "skip_already_accepted_by_line"
+            else:
+                log.info("sent schedule %s for %s", sid, year_month)
+                status = "sent"
+            results.append({"id": sid, "title": title, "status": status})
         except Exception as e:
             log.exception("failed to send %s", sid)
             results.append({"id": sid, "title": title, "status": "error", "error": str(e)})
@@ -131,9 +172,10 @@ def run_daily_schedules(
         "ok": not has_errors,
         "date": d.isoformat(),
         "year_month": year_month,
-        "group_id": group_id,
+        "group_id_set": True,
         "force_resend": force_resend,
         "force_time": force_time,
         "current_time": current_time,
         "results": results,
     }
+
