@@ -121,15 +121,16 @@ https://xxxx.onrender.com/callback
 
 「検証」が成功すればOK。
 
-### 毎日自動で日付チェック（Cron）
+### 自動で日付・時刻をチェック
 
-Renderの無料枠にCronが無い場合は [cron-job.org](https://cron-job.org) が簡単です。
+本番は次の二重構成です。
 
-- URL: `https://xxxx.onrender.com/cron/daily?secret=あなたのCRON_SECRET`  
-- スケジュール: 毎日 **0 0 9 * * ***（日本時間 9:00）  
-- タイムゾーン: Asia/Tokyo  
+- Render 内部: `INTERNAL_SCHEDULER_ENABLED=1` にすると毎分チェックし、設定時刻に一致した予定を送信
+- GitHub Actions: 5分ごとに `/cron/daily` を呼び、Renderの休止や一時的な遅延があっても当日中の未送信予定を追送
 
-BOTが毎朝「今日は18日？月末？」を見て、該当すれば1通送ります。
+LINEへのプッシュ送信には予定・日付ごとの再送防止キーを付けます。同じ送信が再試行されても、LINE側で24時間以内の重複処理を防ぎます。
+
+外部Cronを追加する場合のURLは `https://xxxx.onrender.com/cron/daily?secret=あなたのCRON_SECRET`、タイムゾーンは `Asia/Tokyo` です。
 
 ---
 
@@ -232,3 +233,4 @@ python -c "from bot.scheduler import run_daily_schedules; from datetime import d
 4. 普段の質問はメンション or `/q` → ログを見てAIが回答  
 
 困ったら `http://あなたのURL/` の JSON（`line_configured` / `ai_configured` / `group_id_set`）を見て設定漏れを確認してください。
+
