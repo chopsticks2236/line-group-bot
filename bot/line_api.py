@@ -13,6 +13,7 @@ from linebot.v3.messaging import (
     ReplyMessageRequest,
     TextMessage,
 )
+from linebot.v3.messaging.exceptions import ApiException
 
 from bot import config
 
@@ -38,18 +39,26 @@ def reply_text(reply_token: str, text: str) -> None:
         )
 
 
-def push_text(to: str, text: str) -> None:
+def push_text(to: str, text: str, *, retry_key: str | None = None) -> str:
+    """プッシュ送信する。LINE側で同じ再送キーが受付済みなら成功扱いにする。"""
     if not config.LINE_CHANNEL_ACCESS_TOKEN:
-        log.warning("LINE_CHANNEL_ACCESS_TOKEN 未設定のため送信スキップ")
-        return
+        raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です")
     with _client() as api_client:
         api = MessagingApi(api_client)
-        api.push_message(
-            PushMessageRequest(
-                to=to,
-                messages=[TextMessage(text=text[:5000])],
+        try:
+            api.push_message(
+                PushMessageRequest(
+                    to=to,
+                    messages=[TextMessage(text=text[:5000])],
+                ),
+                x_line_retry_key=retry_key,
             )
-        )
+        except ApiException as exc:
+            if retry_key and getattr(exc, "status", None) == 409:
+                log.info("LINE retry key was already accepted")
+                return "already_accepted"
+            raise
+    return "sent"
 
 
 def get_profile_name(user_id: str, group_id: str | None = None) -> str | None:
@@ -78,3 +87,4 @@ def extract_source(event: Any) -> tuple[str, str]:
     if stype == "room":
         return "room", src.room_id
     return "user", src.user_id
+
