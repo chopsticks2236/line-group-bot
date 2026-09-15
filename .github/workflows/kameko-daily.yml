@@ -2,9 +2,19 @@ name: Kameko daily schedule
 
 on:
   schedule:
-    # GitHub may start scheduled jobs late. Two off-peak checks per hour give a
-    # due-day job time to stay alive until the exact configured minute.
-    - cron: "17,47 * * * *"
+    # GitHub's scheduler may delay or thin high-frequency cron jobs. Start
+    # several low-frequency runners shortly before each configured JST time;
+    # the first one that starts stays alive until the exact minute, while the
+    # endpoint's idempotency guard prevents duplicate LINE messages.
+    # Shift request: 09:00 / 09:15 / 09:30 JST on the 15th.
+    - cron: "0,15,30 0 15 * *"
+    # Month-end payslip: 17:15 / 17:30 / 17:45 JST every day. Non-month-end
+    # runs exit after the schedule check.
+    - cron: "15,30,45 8 * * *"
+    # Contract update: 15:45 / 16:00 / 16:15 JST on the 10th. Inactive months
+    # exit after the schedule check.
+    - cron: "45 6 10 * *"
+    - cron: "0,15 7 10 * *"
   workflow_dispatch:
     inputs:
       date:
@@ -71,7 +81,10 @@ jobs:
           fi
 
           call_scheduler() {
-            curl --fail-with-body --silent --show-error --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 20 --max-time 180 --get "${CURL_ARGS[@]}" -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}"
+            curl --fail-with-body --silent --show-error \
+              --retry 5 --retry-all-errors --retry-delay 10 \
+              --connect-timeout 20 --max-time 180 --get "${CURL_ARGS[@]}" \
+              -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}"
             echo
           }
 
@@ -82,6 +95,8 @@ jobs:
           fi
 
           echo "Keeping this job alive for ${SCHEDULE_IDS} at ${TARGET_TIME}."
+
+          # 時刻前の確認失敗だけでは終了しない。指定時刻の本番呼び出しで再試行する。
           call_scheduler || echo "Pre-target check failed; the exact-time call will retry."
 
           WAKE_LEAD_SECONDS=120
@@ -92,7 +107,10 @@ jobs:
           fi
 
           # Render無料版の休止復帰を送信時刻より前に済ませる。
-          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 10 --connect-timeout 20 --max-time 150 "${BASE_URL}/" >/dev/null || echo "Warm-up request failed; scheduler call will still retry."
+          curl --fail --silent --show-error \
+            --retry 3 --retry-all-errors --retry-delay 10 \
+            --connect-timeout 20 --max-time 150 "${BASE_URL}/" >/dev/null \
+            || echo "Warm-up request failed; scheduler call will still retry."
 
           NOW_EPOCH="$(date +%s)"
           SECONDS_TO_TARGET=$((TARGET_EPOCH - NOW_EPOCH))
