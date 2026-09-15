@@ -2,8 +2,9 @@ name: Kameko daily schedule
 
 on:
   schedule:
-    # Check every 5 minutes; Render sends only due, unsent messages.
-    - cron: "2-57/5 * * * *"
+    # GitHub may start scheduled jobs late. Two off-peak checks per hour give a
+    # due-day job time to stay alive until the exact configured minute.
+    - cron: "17,47 * * * *"
   workflow_dispatch:
     inputs:
       date:
@@ -31,12 +32,23 @@ jobs:
   trigger-render:
     runs-on: ubuntu-latest
     steps:
+      - name: Check out schedule configuration
+        uses: actions/checkout@v4
+
+      - name: Calculate exact-time wait plan
+        id: wait-plan
+        run: python bot/schedule_wait.py >> "$GITHUB_OUTPUT"
+
       - name: Trigger Render scheduler
         env:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           DATE_INPUT: ${{ inputs.date }}
           FORCE_INPUT: ${{ inputs.force }}
           TIME_INPUT: ${{ inputs.time }}
+          WAIT_REQUIRED: ${{ steps.wait-plan.outputs.wait_required }}
+          TARGET_EPOCH: ${{ steps.wait-plan.outputs.target_epoch }}
+          TARGET_TIME: ${{ steps.wait-plan.outputs.target_time }}
+          SCHEDULE_IDS: ${{ steps.wait-plan.outputs.schedule_ids }}
         run: |
           set -euo pipefail
           if [ -z "${CRON_SECRET}" ]; then
@@ -44,7 +56,8 @@ jobs:
             exit 1
           fi
 
-          ENDPOINT="https://line-group-bot-r3yl.onrender.com/cron/daily"
+          BASE_URL="https://line-group-bot-r3yl.onrender.com"
+          ENDPOINT="${BASE_URL}/cron/daily"
           CURL_ARGS=()
 
           if [ -n "${DATE_INPUT}" ]; then
@@ -57,4 +70,35 @@ jobs:
             CURL_ARGS+=(--data-urlencode "time=${TIME_INPUT}")
           fi
 
-          curl --fail-with-body --silent --show-error --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 20 --max-time 180 --get "${CURL_ARGS[@]}" -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}"
+          call_scheduler() {
+            curl --fail-with-body --silent --show-error --retry 5 --retry-all-errors --retry-delay 10 --connect-timeout 20 --max-time 180 --get "${CURL_ARGS[@]}" -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}"
+            echo
+          }
+
+          # 手動実行、対象日ではない日、時刻後に開始した実行は即時確認する。
+          if [ "${GITHUB_EVENT_NAME}" != "schedule" ] || [ "${WAIT_REQUIRED}" != "true" ]; then
+            call_scheduler
+            exit 0
+          fi
+
+          echo "Keeping this job alive for ${SCHEDULE_IDS} at ${TARGET_TIME}."
+          call_scheduler || echo "Pre-target check failed; the exact-time call will retry."
+
+          WAKE_LEAD_SECONDS=120
+          NOW_EPOCH="$(date +%s)"
+          SECONDS_TO_WAKE=$((TARGET_EPOCH - NOW_EPOCH - WAKE_LEAD_SECONDS))
+          if [ "${SECONDS_TO_WAKE}" -gt 0 ]; then
+            sleep "${SECONDS_TO_WAKE}"
+          fi
+
+          # Render無料版の休止復帰を送信時刻より前に済ませる。
+          curl --fail --silent --show-error --retry 3 --retry-all-errors --retry-delay 10 --connect-timeout 20 --max-time 150 "${BASE_URL}/" >/dev/null || echo "Warm-up request failed; scheduler call will still retry."
+
+          NOW_EPOCH="$(date +%s)"
+          SECONDS_TO_TARGET=$((TARGET_EPOCH - NOW_EPOCH))
+          if [ "${SECONDS_TO_TARGET}" -gt 0 ]; then
+            sleep "${SECONDS_TO_TARGET}"
+          fi
+
+          echo "Calling scheduler at the configured time: ${TARGET_TIME}."
+          call_scheduler
