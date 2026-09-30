@@ -265,10 +265,9 @@ def _register_message_handler():
 _register_message_handler()
 
 
-def _run_internal_scheduler_once(now: datetime | None = None) -> dict:
-    """Renderが起動中なら、現在のJST時刻に一致する予定だけを確認する。"""
-    current = now or datetime.now(JST)
-    result = _run_schedules_serialized(force_time=current.strftime("%H:%M"))
+def _run_internal_scheduler_once() -> dict:
+    """復帰後も、今日の時刻を過ぎた未送信予定を毎分再確認する。"""
+    result = _run_schedules_serialized()
     noteworthy = [
         item
         for item in result.get("results", [])
