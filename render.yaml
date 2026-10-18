@@ -33,6 +33,8 @@ services:
         value: xhigh
       - key: OPENAI_VECTOR_STORE_ID
         sync: false
+      - key: OPENAI_WEB_SEARCH_ENABLED
+        value: "1"
       - key: OPENAI_SHIFT_CONVERSATION_ID
         sync: false
       - key: ADMIN_LINE_USER_ID

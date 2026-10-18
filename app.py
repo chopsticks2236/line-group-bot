@@ -84,6 +84,7 @@ def health():
             "group_id_set": bool(config.LINE_GROUP_ID),
             "ai_model": config.OPENAI_MODEL,
             "ai_reasoning_effort": config.OPENAI_REASONING_EFFORT,
+            "web_search_mode": "auto_isolated_v1" if config.OPENAI_WEB_SEARCH_ENABLED else "disabled",
             "shift_collection_enabled": bool(os.getenv("OPENAI_SHIFT_CONVERSATION_ID")),
         }
     )
