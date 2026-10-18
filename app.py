@@ -21,8 +21,9 @@ from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from bot import config
 from bot.ai_reply import apply_setting_command, clean_question, generate_reply, should_reply
 from bot.db import get_setting, init_db, recent_messages, save_message
-from bot.line_api import extract_source, get_profile_name, reply_text
+from bot.line_api import extract_source, get_profile_name, push_text, reply_text
 from bot.scheduler import JST, run_daily_schedules
+from shift_requests import handle_shift_message, is_shift_related
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,6 +82,9 @@ def health():
             "line_configured": config.has_line_credentials(),
             "ai_configured": config.has_ai_key(),
             "group_id_set": bool(config.LINE_GROUP_ID),
+            "ai_model": config.OPENAI_MODEL,
+            "ai_reasoning_effort": config.OPENAI_REASONING_EFFORT,
+            "shift_collection_enabled": bool(os.getenv("OPENAI_SHIFT_CONVERSATION_ID")),
         }
     )
 
@@ -200,6 +204,36 @@ def _register_message_handler():
             text=text,
         )
 
+        mention_ids = _mention_user_ids(event)
+        shift_conversation_id = os.getenv("OPENAI_SHIFT_CONVERSATION_ID", "").strip()
+        if (source_type == "group" and source_id == config.LINE_GROUP_ID
+                and shift_conversation_id and config.has_ai_key() and is_shift_related(text)):
+            try:
+                from openai import OpenAI
+
+                result = handle_shift_message(
+                    client=OpenAI(api_key=config.OPENAI_API_KEY, timeout=25.0, max_retries=1),
+                    conversation_id=shift_conversation_id, group_id=source_id,
+                    user_id=user_id or "", display_name=display_name, text=text,
+                    message_id=str(event.message.id),
+                    now=datetime.fromtimestamp(event.timestamp / 1000, JST),
+                    admin_id=config.ADMIN_LINE_USER_ID, mention_ids=mention_ids,
+                    bot_id=BOT_USER_ID, model=config.OPENAI_MODEL,
+                    effort=config.OPENAI_REASONING_EFFORT, send=push_text,
+                )
+                if result.handled:
+                    if result.reply:
+                        reply_text(event.reply_token, result.reply)
+                    answer_text = result.sent_text or result.reply
+                    if answer_text:
+                        save_message(source_type=source_type, source_id=source_id,
+                                     user_id="bot", display_name="かめ子", text=answer_text)
+                    return
+            except Exception:
+                log.exception("shift collection failed")
+                reply_text(event.reply_token, "休み希望の保存・集計でエラーが出たよ。ご主人様に確認してね😭")
+                return
+
         msgs_cfg = config.load_messages().get("ai", {})
         default_only_mention = bool(msgs_cfg.get("reply_only_when_mentioned", True))
         only_mention = get_setting(
@@ -208,7 +242,6 @@ def _register_message_handler():
         max_logs = int(msgs_cfg.get("max_log_messages", 40))
         system_prompt = msgs_cfg.get("system_prompt") or "簡潔に日本語で答えてください。"
 
-        mention_ids = _mention_user_ids(event)
         will_reply = should_reply(
             text,
             mention_ids=mention_ids,
@@ -286,7 +319,7 @@ def _internal_scheduler_loop() -> None:
         if minute_key != last_minute:
             last_minute = minute_key
             try:
-                _run_internal_scheduler_once(now)
+                _run_internal_scheduler_once()
             except Exception:
                 log.exception("internal scheduler failed")
         _scheduler_stop.wait(max(1, 60 - now.second))

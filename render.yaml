@@ -13,6 +13,8 @@ services:
         value: "3.12.10"
       - key: TZ
         value: Asia/Tokyo
+      - key: GUNICORN_CMD_ARGS
+        value: "--workers 1 --threads 4 --timeout 90"
       - key: INTERNAL_SCHEDULER_ENABLED
         value: "1"
       - key: LINE_CHANNEL_ACCESS_TOKEN
@@ -30,6 +32,8 @@ services:
       - key: OPENAI_REASONING_EFFORT
         value: xhigh
       - key: OPENAI_VECTOR_STORE_ID
+        sync: false
+      - key: OPENAI_SHIFT_CONVERSATION_ID
         sync: false
       - key: ADMIN_LINE_USER_ID
         sync: false
