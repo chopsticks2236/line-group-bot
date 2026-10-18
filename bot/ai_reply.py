@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from bot import config
 from bot.db import delete_setting, get_setting, set_setting
+from bot.web_context import ANSWER_POLICY, WebContext, append_web_sources, get_web_context, web_block
 
 log = logging.getLogger(__name__)
 
@@ -198,21 +200,28 @@ def generate_reply(
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=config.OPENAI_API_KEY)
+    # Bound the added search stages so a LINE reply does not wait indefinitely.
+    deadline = time.monotonic() + 50.0
+    client = OpenAI(api_key=config.OPENAI_API_KEY, timeout=8.0, max_retries=0)
     log_block = build_log_block(log_messages)
     vector_context, vector_search_ok = search_vector_store(client, question)
     requester = "ご主人様（管理者）" if is_admin_user(user_id) else "グループメンバー"
     style_hint = get_setting("style_hint")
     if style_hint:
         system_prompt = f"{system_prompt}\n\n【ご主人様が設定した口調メモ】\n{style_hint}"
+    system_prompt = f"{system_prompt}\n\n{ANSWER_POLICY}"
+    web_context = (
+        get_web_context(client, question, log_messages, config.OPENAI_MODEL, config.OPENAI_REASONING_EFFORT)
+        if config.OPENAI_WEB_SEARCH_ENABLED else WebContext("disabled")
+    )
 
     user_content = (
         f"【会話ログ】\n{log_block}\n\n"
         f"【Vector Store検索結果】\n{vector_context}\n\n"
         f"【質問者】\n{requester}\n\n"
         f"【今回の質問】\n{question}\n\n"
-        "会話ログを最優先に参照し、次にVector Store検索結果を使って回答してください。"
-        "どちらにも根拠がない場合は、推測せずご主人様（km）が答える旨を伝えてください。"
+        f"【公開Web検索結果】\n{web_block(web_context)}\n\n"
+        "社内情報と公開情報の根拠を区別し、情報源の使い分けの指示に従って回答してください。"
     )
 
     try:
@@ -231,15 +240,17 @@ def generate_reply(
             "reasoning": {"effort": config.OPENAI_REASONING_EFFORT},
             "instructions": system_prompt,
             "input": user_content,
+            "store": False,
+            "max_output_tokens": 4096,
         }
         if tools:
             request_args["tools"] = tools
 
-        resp = client.responses.create(
+        resp = client.with_options(timeout=max(3.0, min(30.0, deadline - time.monotonic()))).responses.create(
             **request_args,
         )
         answer = (resp.output_text or "").strip()
-        return answer or "回答を生成できませんでした。"
+        return append_web_sources(answer, web_context) if answer else "回答を生成できませんでした。"
     except Exception as e:
         log.exception("AI reply failed")
         return "ごめん、今はうまく答えられないみたい。少し待ってからもう一度呼んでね。"
