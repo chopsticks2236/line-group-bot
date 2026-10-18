@@ -228,6 +228,7 @@ def generate_reply(
 
         request_args: dict[str, Any] = {
             "model": config.OPENAI_MODEL,
+            "reasoning": {"effort": config.OPENAI_REASONING_EFFORT},
             "instructions": system_prompt,
             "input": user_content,
         }
