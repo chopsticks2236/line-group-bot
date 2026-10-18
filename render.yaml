@@ -26,7 +26,9 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL
-        value: gpt-5.6-luna
+        value: gpt-6-luna
+      - key: OPENAI_REASONING_EFFORT
+        value: xhigh
       - key: OPENAI_VECTOR_STORE_ID
         sync: false
       - key: ADMIN_LINE_USER_ID
