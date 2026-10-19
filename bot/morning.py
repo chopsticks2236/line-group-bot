@@ -47,8 +47,12 @@ def enabled() -> bool:
     return os.getenv("MORNING_NOTIFICATION_ENABLED", "0").lower() in {"1", "true", "yes"}
 
 
-def mail_window(day: date) -> tuple[datetime, datetime]:
-    return (datetime.combine(day - timedelta(days=1), time(9), JST),
+def mail_window(day: date, *, mode=None) -> tuple[datetime, datetime]:
+    mode = mode or os.getenv("MORNING_WINDOW_MODE", "legacy")
+    if mode not in {"legacy", "continuous"}:
+        raise MorningInputError("朝の集計時間の設定が不正だよ")
+    begin = time(7, 45) if mode == "continuous" else time(9)
+    return (datetime.combine(day - timedelta(days=1), begin, JST),
             datetime.combine(day, time(7, 45), JST))
 
 
@@ -224,7 +228,7 @@ def _imap_day(day: date) -> str:
     return f"{day.day:02d}-{calendar.month_abbr[day.month]}-{day.year}"
 
 
-def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL) -> dict:
+def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL, *, include_keys=False) -> dict:
     env = os.environ if env is None else env
     prefix = "GMAIL" if provider == "gmail" else "YAHOO"
     user, password = env.get(f"{prefix}_IMAP_USER", ""), env.get(f"{prefix}_IMAP_PASSWORD", "")
@@ -232,7 +236,7 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
         raise MorningInputError(f"{prefix}_IMAP_USER / {prefix}_IMAP_PASSWORD が未入力だよ")
     platforms = ("メルカリ", "ラクマ") if provider == "gmail" else ("Yahoo!フリマ", "ヤフオク")
     host = "imap.gmail.com" if provider == "gmail" else "imap.mail.yahoo.co.jp"
-    start, end = mail_window(day)
+    start, end = mail_window(day, mode=env.get("MORNING_WINDOW_MODE", "legacy"))
     found = {platform: set() for platform in platforms}
     connection = None
     stage = "connect"
@@ -368,7 +372,12 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
             if typ != "OK" or len(parts) != 1:
                 raise MorningInputError(f"{prefix}の販売通知の取得に失敗したよ")
             found[platform].add(transaction_id(platform, subject, _mail_text(parts[0])))
-        return {platform: len(ids) for platform, ids in found.items()}
+        counts = {platform: len(ids) for platform, ids in found.items()}
+        if include_keys:
+            keys = {platform: sorted(hashlib.sha256(f"{platform}:{trade}".encode()).hexdigest()
+                                     for trade in ids) for platform, ids in found.items()}
+            return {"counts": counts, "keys": keys}
+        return counts
     except MorningInputError:
         raise
     except Exception as exc:
@@ -387,7 +396,7 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
                 pass
 
 
-def build_digest(day: date, shifts: list[dict], counts: dict) -> str:
+def build_digest(day: date, shifts: list[dict], counts: dict, *, first_day=None, window_mode=None) -> str:
     if set(counts) != set(PLATFORMS) or any(type(v) is not int or v < 0 for v in counts.values()):
         raise MorningInputError("4サービスの発送件数がそろっていないよ")
     if shifts:
@@ -399,8 +408,11 @@ def build_digest(day: date, shifts: list[dict], counts: dict) -> str:
         lines = ["今日はみんなお休みだよ😊"]
     lines = ["おはようございます😊", ""] + lines
     lines += ["", "発送件数は"] + [f"{p}{counts[p]}件" for p in PLATFORMS] + ["だよ✨"]
-    a, b = mail_window(day)
-    lines += ["", f"※{a.month}/{a.day} 9:00〜{b.month}/{b.day} 7:45に届いた支払い済み販売通知の件数だよ。", "発送済み・キャンセルは取引画面でも確認してね"]
+    a, _ = mail_window(first_day or day, mode=window_mode)
+    _, b = mail_window(day, mode=window_mode)
+    if first_day and first_day < day:
+        lines += ["", "※お休み中の未通知分もまとめた件数だよ。"]
+    lines += ["", f"※{a.month}/{a.day} {a.hour}:{a.minute:02d}〜{b.month}/{b.day} 7:45に届いた支払い済み販売通知の件数だよ。", "発送済み・キャンセルは取引画面でも確認してね"]
     return "\n".join(lines)
 
 
@@ -452,6 +464,9 @@ def run_morning(*, now=None, dry_run=False, day=None) -> dict:
     if not config.LINE_GROUP_ID or not config.LINE_CHANNEL_ACCESS_TOKEN:
         return {"ok":False, "status":"missing_line_configuration"}
     try:
+        if os.getenv("MORNING_WORKDAY_ONLY", "0").lower() in {"1", "true", "yes"}:
+            from bot.morning_ledger import run_workday_morning
+            return run_workday_morning(day, dry_run=dry_run)
         result = collect(day)
         if dry_run:
             # LINE validate checks payload only: this does not send or prove delivery.
