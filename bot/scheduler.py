@@ -166,7 +166,12 @@ def run_daily_schedules(
             log.exception("failed to send %s", sid)
             results.append({"id": sid, "title": title, "status": "error", "error": str(e)})
 
-    has_errors = any(item.get("status") == "error" for item in results)
+    if force_date is None and force_time is None and not force_resend:
+        from bot.morning import enabled as morning_enabled, run_morning
+        if morning_enabled():
+            morning = run_morning(now=now)
+            results.append({"id": "morning_digest_v1", **morning})
+    has_errors = any(item.get("status") == "error" or item.get("ok") is False for item in results)
 
     return {
         "ok": not has_errors,
