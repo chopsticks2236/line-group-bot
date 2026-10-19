@@ -1,0 +1,39 @@
+name: Kameko morning digest
+
+on:
+  schedule:
+    # JST 07:47, 07:52, 07:57. Warm before 08:00, independent of monthly jobs.
+    - cron: "47,52,57 22 * * *"
+    # Delayed-start / outage recovery within the morning send window.
+    - cron: "13,33 23 * * *"
+    - cron: "13 0 * * *"
+  workflow_dispatch:
+    inputs:
+      diagnostic:
+        description: "3回の接続・本文検証（LINEには送信しない）"
+        type: boolean
+        default: true
+      date:
+        description: "診断対象日 YYYY-MM-DD（空欄は当日）"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kameko-morning-digest
+  cancel-in-progress: false
+
+jobs:
+  morning:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Warm Render and run morning digest
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          DIAGNOSTIC: ${{ inputs.diagnostic || 'false' }}
+          TEST_DATE: ${{ inputs.date }}
+        run: python bot/morning_trigger.py
