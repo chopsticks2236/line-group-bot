@@ -7,6 +7,7 @@ LINEグループBOT
 from __future__ import annotations
 
 import logging
+import hmac
 import os
 import sys
 from datetime import date, datetime
@@ -23,6 +24,7 @@ from bot.ai_reply import apply_setting_command, clean_question, generate_reply, 
 from bot.db import get_setting, init_db, recent_messages, save_message
 from bot.line_api import extract_source, get_profile_name, push_text, reply_text
 from bot.scheduler import JST, run_daily_schedules
+from bot.morning import enabled as morning_enabled, run_morning
 from shift_requests import handle_shift_message, is_shift_related
 
 logging.basicConfig(
@@ -86,6 +88,7 @@ def health():
             "ai_reasoning_effort": config.OPENAI_REASONING_EFFORT,
             "web_search_mode": "auto_isolated_v1" if config.OPENAI_WEB_SEARCH_ENABLED else "disabled",
             "shift_collection_enabled": bool(os.getenv("OPENAI_SHIFT_CONVERSATION_ID")),
+            "morning_notification_enabled": morning_enabled(),
         }
     )
 
@@ -140,7 +143,7 @@ def cron_daily():
     時刻指定: ?date=2026-04-15&time=09:45
     """
     secret = request.headers.get("X-Cron-Secret") or request.args.get("secret", "")
-    if secret != config.CRON_SECRET:
+    if not config.CRON_SECRET or config.CRON_SECRET in {"change-me", "change-me-to-random-string"} or not hmac.compare_digest(secret, config.CRON_SECRET):
         abort(401)
 
     force: date | None = None
@@ -159,6 +162,32 @@ def cron_daily():
     log.info("cron result: %s", result)
     status_code = 200 if result.get("ok") else 502
     return jsonify(result), status_code
+
+
+@app.get("/cron/morning")
+@app.post("/cron/morning")
+def cron_morning():
+    """GET is always a non-sending diagnostic; POST uses today's due window.
+
+    The same scheduler lock serializes the internal timer and external calls.
+    A requested historical/future date is accepted ONLY for the GET dry-run.
+    """
+    secret = request.headers.get("X-Cron-Secret", "")
+    if not config.CRON_SECRET or config.CRON_SECRET in {"change-me", "change-me-to-random-string"} or not hmac.compare_digest(secret, config.CRON_SECRET):
+        abort(401)
+    test_day = None
+    if request.args.get("date"):
+        if request.method != "GET":
+            return jsonify({"ok":False,"error":"date is available only for GET diagnostics"}), 400
+        try:
+            test_day = date.fromisoformat(request.args["date"])
+        except ValueError:
+            return jsonify({"ok":False,"error":"invalid date"}), 400
+    with _schedule_lock:
+        result = run_morning(dry_run=request.method == "GET", day=test_day)
+    # No private attendance, mail contents or credentials in application logs.
+    log.info("morning check: ok=%s status=%s", result.get("ok"), result.get("status"))
+    return jsonify(result), 200 if result.get("ok") else 502
 
 
 def _mention_user_ids(event: MessageEvent) -> list[str]:
