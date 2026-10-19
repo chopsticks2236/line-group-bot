@@ -46,6 +46,14 @@ class ScheduleTests(unittest.TestCase):
         result = parse_schedule(schedule_fixture(), "2026年11月5日から5日まで.pdf")
         self.assertEqual(list(result['days']), ['2026-11-05'])
 
+    def test_explicitly_confirmed_extra_day_does_not_shift_adjacent_day(self):
+        result = parse_schedule(schedule_fixture(), "2026年11月6日から20日まで.pdf",extra_day=date(2026,11,5))
+        self.assertEqual(len(result['days']['2026-11-05']),2)
+        self.assertEqual(result['days']['2026-11-06'],[])
+        self.assertNotIn('2026-11-04',result['days'])
+        with self.assertRaises(MorningInputError):
+            parse_schedule(schedule_fixture(), "2026年11月6日から20日まで.pdf",extra_day=date(2026,10,5))
+
     def test_mismatched_month_rejected(self):
         with self.assertRaises(MorningInputError):
             parse_schedule(schedule_fixture(), "2026年10月1日から20日まで.pdf")
@@ -218,6 +226,27 @@ class MailTests(unittest.TestCase):
         with self.assertRaisesRegex(MorningInputError,'3項目'):
             count_mailbox('yahoo',date(2026,11,5),env,connect=Recreated)
 
+    def test_yahoo_one_day_backfill_uses_full_index_not_incomplete_cursor(self):
+        calls=[]
+        class BackfillYahoo:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'1']
+            def status(self,*a):return 'OK',[b'INBOX (UIDNEXT 102 UIDVALIDITY 77)']
+            def fetch(self,*args):
+                calls.append(args)
+                return 'OK',[b'1 (UID 3 INTERNALDATE "03-Nov-2026 08:00:00 +0900")']
+            def uid(self,*a):raise AssertionError('Must not use later cursor for earlier window')
+            def logout(self):pass
+        env={'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real',
+             'YAHOO_IMAP_START_UID':'100','YAHOO_IMAP_UIDVALIDITY':'77',
+             'YAHOO_IMAP_TRACK_FROM':'2026-11-04T09:00:00+09:00',
+             'YAHOO_IMAP_BACKFILL_DATE':'2026-11-04'}
+        self.assertEqual(count_mailbox('yahoo',date(2026,11,4),env,connect=BackfillYahoo),{'Yahoo!フリマ':0,'ヤフオク':0})
+        self.assertEqual(calls,[('1:*','(UID INTERNALDATE)')])
+        with self.assertRaisesRegex(MorningInputError,'開始日より前'):
+            count_mailbox('yahoo',date(2026,11,3),env,connect=BackfillYahoo)
+
     def test_postlogin_timeout_is_not_reported_as_bad_password(self):
         class TimeoutIndex:
             def __init__(self,*a,**k):pass
@@ -235,10 +264,17 @@ class DigestTests(unittest.TestCase):
     def test_requested_tone_and_all_four_platforms(self):
         shifts=[{'name':'上元さん','start':'09:00','end':'13:00'},{'name':'小山さん','start':'09:00','end':'13:00'}]
         result=build_digest(date(2026,11,5),shifts,dict(zip(PLATFORMS,[3,0,0,4])))
+        self.assertTrue(result.startswith('おはようございます😊\n\n'))
         self.assertIn('今日の出勤は\n上元さん9:00〜13:00\n小山さん9:00〜13:00\nだよ',result)
         self.assertIn('発送件数は\nメルカリ3件',result)
         self.assertIn('ヤフオク4件',result)
         self.assertIn('11/4 9:00〜11/5 7:45',result)
+
+    def test_day_off_still_has_greeting_and_shipping_counts(self):
+        result=build_digest(date(2026,11,6),[],dict.fromkeys(PLATFORMS,0))
+        self.assertTrue(result.startswith('おはようございます😊\n\n今日はみんなお休みだよ😊'))
+        self.assertIn('発送件数は',result)
+        self.assertNotIn('今日の出勤は',result)
 
     def test_all_platforms_must_succeed(self):
         with self.assertRaises(MorningInputError):
