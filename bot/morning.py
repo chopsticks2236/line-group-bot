@@ -228,25 +228,70 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
     start, end = mail_window(day)
     found = {platform: set() for platform in platforms}
     connection = None
+    stage = "connect"
     try:
         connection = connect(host, 993, ssl_context=ssl.create_default_context(), timeout=15)
+        stage = "login"
         connection.login(user, password.replace(" ", "") if provider == "gmail" else password)
         folder = env.get(f"{prefix}_IMAP_FOLDER", "INBOX") or "INBOX"
         # EXAMINE and BODY.PEEK leave unread flags and mailbox contents intact.
-        if connection.select(folder, readonly=True)[0] != "OK":
+        stage = "folder"
+        selected, folder_data = connection.select(folder, readonly=True)
+        if selected != "OK":
             raise MorningInputError(f"{prefix}の対象フォルダーが開けなかったよ")
-        senders = sorted({sender for p in platforms for sender in SENDERS[p]})
-        query = [f'FROM "{s}"' for s in senders]
-        joined = query[-1]
-        for part in reversed(query[:-1]):
-            joined = f"OR ({part}) ({joined})"
-        typ, data = connection.uid("SEARCH", None, f'(SINCE {_imap_day(start.date()-timedelta(days=1))} BEFORE {_imap_day(end.date()+timedelta(days=1))} ({joined}))')
-        if typ != "OK":
-            raise MorningInputError(f"{prefix}のメール検索に失敗したよ")
-        uids = (data[0] or b"").split()
+        if provider == "yahoo":
+            # This Yahoo mailbox accepts LOGIN/EXAMINE/FETCH, but even tiny
+            # SEARCH queries time out. Read only UID+INTERNALDATE metadata;
+            # never infer a date boundary from UID/sequence ordering.
+            stage = "date_index"
+            expected_count = int(folder_data[0])
+            if expected_count > 500000:
+                raise MorningInputError("YAHOOの受信箱が大きすぎるため、販売通知専用フォルダーでの設定が必要だよ")
+            uids = []
+            if expected_count:
+                sock = getattr(connection, "sock", None)
+                if sock is not None:
+                    sock.settimeout(55)
+                typ, metadata_rows = connection.fetch("1:*", "(UID INTERNALDATE)")
+                if sock is not None:
+                    sock.settimeout(15)
+                if typ != "OK":
+                    raise MorningInputError("YAHOOの受信日時一覧を取得できなかったよ")
+                seen = set()
+                for metadata in metadata_rows or []:
+                    if not isinstance(metadata, bytes):
+                        raise MorningInputError("YAHOOの受信日時一覧の形式が不正だよ")
+                    uid_match = re.search(rb"\bUID ([0-9]+)\b", metadata)
+                    date_match = re.search(rb'INTERNALDATE "([^"]+)"', metadata)
+                    if not uid_match or not date_match:
+                        raise MorningInputError("YAHOOの受信日時を確認できなかったよ")
+                    uid = uid_match.group(1)
+                    if uid in seen:
+                        raise MorningInputError("YAHOOの受信日時一覧が重複しているよ")
+                    seen.add(uid)
+                    received = parsedate_to_datetime(date_match.group(1).decode("ascii"))
+                    if received.tzinfo is None:
+                        raise MorningInputError("YAHOOの受信日時にタイムゾーンがないよ")
+                    if start <= received < end:
+                        uids.append(uid)
+                if len(seen) < expected_count:
+                    raise MorningInputError("読み取り中にYAHOOの受信箱が更新されたため、完全に確認できなかったよ。再試行してね")
+                del metadata_rows, seen
+        else:
+            stage = "search"
+            senders = sorted({sender for p in platforms for sender in SENDERS[p]})
+            query = [f'FROM "{s}"' for s in senders]
+            joined = query[-1]
+            for part in reversed(query[:-1]):
+                joined = f"OR ({part}) ({joined})"
+            typ, data = connection.uid("SEARCH", None, f'(SINCE {_imap_day(start.date()-timedelta(days=1))} BEFORE {_imap_day(end.date()+timedelta(days=1))} ({joined}))')
+            if typ != "OK":
+                raise MorningInputError(f"{prefix}のメール検索に失敗したよ")
+            uids = (data[0] or b"").split()
         if len(uids) > 1000:
             raise MorningInputError(f"{prefix}の対象メールが多すぎるため集計を止めたよ")
         for uid in uids:
+            stage = "headers"
             typ, fetched = connection.uid("FETCH", uid, '(INTERNALDATE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID)])')
             rows = [row for row in (fetched or []) if isinstance(row, tuple)]
             if typ != "OK" or len(rows) != 1:
@@ -266,6 +311,7 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
             platform = sale_candidate(sender, subject, platforms)
             if not platform:
                 continue
+            stage = "body"
             typ, fetched = connection.uid("FETCH", uid, '(BODY.PEEK[]<0.262144>)')
             parts = [row[1] for row in (fetched or []) if isinstance(row, tuple)]
             if typ != "OK" or len(parts) != 1:
@@ -276,7 +322,12 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
         raise
     except Exception as exc:
         # Do not expose IMAP exceptions: some servers echo credential material.
-        raise MorningInputError(f"{prefix}への接続・認証に失敗したよ。設定を確認してね") from exc
+        if stage in {"connect", "login"}:
+            message = f"{prefix}への接続・認証に失敗したよ。設定を確認してね"
+        else:
+            label = {"folder":"受信箱を開く処理", "date_index":"受信日時一覧の取得", "search":"メール検索", "headers":"メール受信日時・件名の確認", "body":"販売通知の読み取り"}.get(stage, "集計")
+            message = f"{prefix}の{label}でエラーが出たよ（ログイン後の処理）。時間をおいて再試行してね"
+        raise MorningInputError(message) from exc
     finally:
         if connection:
             try:
