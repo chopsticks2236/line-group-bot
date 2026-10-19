@@ -165,6 +165,59 @@ class MailTests(unittest.TestCase):
         with self.assertRaisesRegex(MorningInputError,'完全に確認できなかった'):
             count_mailbox('yahoo',date(2026,11,5),{'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real'},connect=Incomplete)
 
+    def test_yahoo_cursor_only_reads_new_uid_metadata(self):
+        calls=[]
+        class CursorYahoo:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'600000']
+            def status(self,*a):return 'OK',[b'INBOX (UIDNEXT 102 UIDVALIDITY 77)']
+            def fetch(self,*a):raise AssertionError('Must not scan historic metadata')
+            def uid(self,command,*args):
+                calls.append((command,)+args)
+                self_test.assertEqual(args,('100:101','(UID INTERNALDATE)'))
+                return 'OK',[
+                    b'599999 (UID 100 INTERNALDATE "04-Nov-2026 08:59:59 +0900")',
+                    b'600000 (UID 101 INTERNALDATE "05-Nov-2026 07:45:00 +0900")']
+            def logout(self):pass
+        self_test=self
+        env={'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real',
+             'YAHOO_IMAP_START_UID':'100','YAHOO_IMAP_UIDVALIDITY':'77',
+             'YAHOO_IMAP_TRACK_FROM':'2026-11-04T09:00:00+09:00'}
+        self.assertEqual(count_mailbox('yahoo',date(2026,11,5),env,connect=CursorYahoo),{'Yahoo!フリマ':0,'ヤフオク':0})
+        self.assertEqual(len(calls),1)
+
+    def test_yahoo_cursor_empty_tail_never_fetches_backwards_range(self):
+        class EmptyTail:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'200000']
+            def status(self,*a):return 'OK',[b'INBOX (UIDNEXT 100 UIDVALIDITY 77)']
+            def uid(self,*a):raise AssertionError('No new mail; must not FETCH 100:*')
+            def logout(self):pass
+        env={'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real',
+             'YAHOO_IMAP_START_UID':'100','YAHOO_IMAP_UIDVALIDITY':'77',
+             'YAHOO_IMAP_TRACK_FROM':'2026-11-04T09:00:00+09:00'}
+        self.assertEqual(count_mailbox('yahoo',date(2026,11,5),env,connect=EmptyTail),{'Yahoo!フリマ':0,'ヤフオク':0})
+
+    def test_yahoo_cursor_rejects_pretracking_and_recreated_mailbox(self):
+        class Recreated:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'2']
+            def status(self,*a):return 'OK',[b'INBOX (UIDNEXT 102 UIDVALIDITY 88)']
+            def logout(self):pass
+        env={'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real',
+             'YAHOO_IMAP_START_UID':'100','YAHOO_IMAP_UIDVALIDITY':'77',
+             'YAHOO_IMAP_TRACK_FROM':'2026-11-04T09:00:00+09:00'}
+        with self.assertRaisesRegex(MorningInputError,'開始日より前'):
+            count_mailbox('yahoo',date(2026,11,4),env,connect=Recreated)
+        with self.assertRaisesRegex(MorningInputError,'識別情報が変わった'):
+            count_mailbox('yahoo',date(2026,11,5),env,connect=Recreated)
+        del env['YAHOO_IMAP_TRACK_FROM']
+        with self.assertRaisesRegex(MorningInputError,'3項目'):
+            count_mailbox('yahoo',date(2026,11,5),env,connect=Recreated)
+
     def test_postlogin_timeout_is_not_reported_as_bad_password(self):
         class TimeoutIndex:
             def __init__(self,*a,**k):pass
@@ -201,6 +254,12 @@ class DigestTests(unittest.TestCase):
     @patch.dict('os.environ',{'MORNING_NOTIFICATION_ENABLED':'0'})
     def test_disabled_never_reads_or_sends(self,mocked):
         self.assertEqual(run_morning()['status'],'disabled')
+        mocked.assert_not_called()
+
+    @patch('bot.morning.collect')
+    @patch.dict('os.environ',{'MORNING_NOTIFICATION_ENABLED':'1','MORNING_START_DATE':'2026-11-05'})
+    def test_before_start_date_does_not_read_mail_or_send(self,mocked):
+        self.assertEqual(run_morning(now=datetime(2026,11,4,8,0,tzinfo=JST))['status'],'not_started')
         mocked.assert_not_called()
 
     @patch('bot.morning.collect')
