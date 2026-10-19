@@ -89,6 +89,8 @@ def health():
             "web_search_mode": "auto_isolated_v1" if config.OPENAI_WEB_SEARCH_ENABLED else "disabled",
             "shift_collection_enabled": bool(os.getenv("OPENAI_SHIFT_CONVERSATION_ID")),
             "morning_notification_enabled": morning_enabled(),
+            "morning_workday_only": os.getenv("MORNING_WORKDAY_ONLY", "0").lower() in {"1","true","yes"},
+            "morning_window_mode": os.getenv("MORNING_WINDOW_MODE", "legacy"),
         }
     )
 
