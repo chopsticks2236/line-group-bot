@@ -245,20 +245,56 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
             # never infer a date boundary from UID/sequence ordering.
             stage = "date_index"
             expected_count = int(folder_data[0])
-            if expected_count > 500000:
+            cursor_names = ("YAHOO_IMAP_START_UID", "YAHOO_IMAP_UIDVALIDITY", "YAHOO_IMAP_TRACK_FROM")
+            cursor_values = [env.get(name, "").strip() for name in cursor_names]
+            use_cursor = any(cursor_values)
+            first_uid = last_uid = None
+            if use_cursor:
+                if not all(cursor_values):
+                    raise MorningInputError("YAHOOの読み取り開始位置の3項目がそろっていないよ")
+                try:
+                    first_uid, expected_validity = map(int, cursor_values[:2])
+                    track_from = datetime.fromisoformat(cursor_values[2])
+                    if first_uid < 1 or expected_validity < 1 or track_from.tzinfo is None:
+                        raise ValueError("invalid cursor")
+                except ValueError as exc:
+                    raise MorningInputError("YAHOOの読み取り開始位置の設定が不正だよ") from exc
+                if start < track_from:
+                    raise MorningInputError("YAHOOの読み取り開始日より前の期間は集計できないよ")
+                typ, status_rows = connection.status(folder, "(UIDNEXT UIDVALIDITY)")
+                raw_status = b" ".join(row for row in (status_rows or []) if isinstance(row, bytes))
+                validity = re.search(rb"\bUIDVALIDITY ([0-9]+)\b", raw_status)
+                uid_next = re.search(rb"\bUIDNEXT ([0-9]+)\b", raw_status)
+                if typ != "OK" or not validity or not uid_next:
+                    raise MorningInputError("YAHOOの受信箱の識別情報を確認できなかったよ")
+                if int(validity.group(1)) != expected_validity:
+                    raise MorningInputError("YAHOOの受信箱の識別情報が変わったため、読み取り開始位置の再設定が必要だよ")
+                last_uid = int(uid_next.group(1)) - 1
+                if last_uid < first_uid - 1:
+                    raise MorningInputError("YAHOOのメール番号が開始位置より前に戻っているよ")
+            elif expected_count > 500000:
                 raise MorningInputError("YAHOOの受信箱が大きすぎるため、販売通知専用フォルダーでの設定が必要だよ")
             uids = []
-            if expected_count:
+            if expected_count and (not use_cursor or last_uid >= first_uid):
                 sock = getattr(connection, "sock", None)
                 if sock is not None:
                     sock.settimeout(55)
-                typ, metadata_rows = connection.fetch("1:*", "(UID INTERNALDATE)")
+                if use_cursor:
+                    # Fixed baseline recorded before the first monitored window.
+                    # An explicit upper bound avoids IMAP's reversed n:* range
+                    # behavior when the requested UID does not exist yet.
+                    typ, metadata_rows = connection.uid("FETCH", f"{first_uid}:{last_uid}", "(UID INTERNALDATE)")
+                else:
+                    typ, metadata_rows = connection.fetch("1:*", "(UID INTERNALDATE)")
                 if sock is not None:
                     sock.settimeout(15)
                 if typ != "OK":
                     raise MorningInputError("YAHOOの受信日時一覧を取得できなかったよ")
                 seen = set()
                 for metadata in metadata_rows or []:
+                    if metadata is None and use_cursor:
+                        # A UID range may contain only already-deleted messages.
+                        continue
                     if not isinstance(metadata, bytes):
                         raise MorningInputError("YAHOOの受信日時一覧の形式が不正だよ")
                     uid_match = re.search(rb"\bUID ([0-9]+)\b", metadata)
@@ -266,6 +302,8 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
                     if not uid_match or not date_match:
                         raise MorningInputError("YAHOOの受信日時を確認できなかったよ")
                     uid = uid_match.group(1)
+                    if use_cursor and not first_uid <= int(uid) <= last_uid:
+                        raise MorningInputError("YAHOOの受信日時一覧が指定したメール番号の範囲外だよ")
                     if uid in seen:
                         raise MorningInputError("YAHOOの受信日時一覧が重複しているよ")
                     seen.add(uid)
@@ -274,7 +312,7 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
                         raise MorningInputError("YAHOOの受信日時にタイムゾーンがないよ")
                     if start <= received < end:
                         uids.append(uid)
-                if len(seen) < expected_count:
+                if not use_cursor and len(seen) < expected_count:
                     raise MorningInputError("読み取り中にYAHOOの受信箱が更新されたため、完全に確認できなかったよ。再試行してね")
                 del metadata_rows, seen
         else:
@@ -382,6 +420,14 @@ def run_morning(*, now=None, dry_run=False, day=None) -> dict:
     if not dry_run:
         if not enabled():
             return {"ok":True, "status":"disabled"}
+        start_raw = os.getenv("MORNING_START_DATE", "").strip()
+        if start_raw:
+            try:
+                start_day = date.fromisoformat(start_raw)
+            except ValueError:
+                return {"ok":False, "status":"invalid_start_date"}
+            if day < start_day:
+                return {"ok":True, "status":"not_started", "starts_on":start_raw}
         if day != now.date() or now.hour < 8:
             return {"ok":True, "status":"not_due"}
         # Never emit a morning announcement late at night after an outage.
