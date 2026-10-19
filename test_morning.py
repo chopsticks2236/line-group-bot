@@ -128,6 +128,55 @@ class MailTests(unittest.TestCase):
         with self.assertRaises(MorningInputError):
             collect(date(2026,11,5),env={})
 
+    def test_yahoo_uses_only_metadata_not_search_and_handles_uid_date_order(self):
+        calls=[]
+        class FakeYahoo:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'2']
+            def fetch(self,sequence,fields):
+                calls.append(('FETCH',sequence,fields))
+                return 'OK',[
+                    b'1 (UID 3 INTERNALDATE "04-Nov-2026 09:00:00 +0900")',
+                    b'2 (UID 200 INTERNALDATE "05-Nov-2026 07:45:00 +0900")']
+            def uid(self,command,*args):
+                calls.append((command,)+args)
+                if command=='SEARCH':raise AssertionError('Yahoo SEARCH must not be used')
+                self_uid=args[0]
+                if self_uid!=b'3':raise AssertionError('Outside-window UID was read')
+                m=EmailMessage()
+                m['From']='auction-master@mail.yahoo.co.jp'
+                m['Subject']='Yahoo!オークション - 支払いが完了しました。商品を発送してください：テスト(a1234567890)'
+                m.set_content('取引を確認して発送してください')
+                return 'OK',[(b'1 (UID 3 INTERNALDATE "04-Nov-2026 09:00:00 +0900")',m.as_bytes())]
+            def logout(self):pass
+        result=count_mailbox('yahoo',date(2026,11,5),{'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real'},connect=FakeYahoo)
+        self.assertEqual(result,{'Yahoo!フリマ':0,'ヤフオク':1})
+        self.assertIn(('FETCH','1:*','(UID INTERNALDATE)'),calls)
+        self.assertEqual(len([c for c in calls if c[0]=='FETCH' and isinstance(c[1],bytes)]),2)
+
+    def test_yahoo_partial_metadata_fails_closed(self):
+        class Incomplete:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'2']
+            def fetch(self,*a):return 'OK',[b'1 (UID 3 INTERNALDATE "04-Nov-2026 09:00:00 +0900")']
+            def logout(self):pass
+        with self.assertRaisesRegex(MorningInputError,'完全に確認できなかった'):
+            count_mailbox('yahoo',date(2026,11,5),{'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real'},connect=Incomplete)
+
+    def test_postlogin_timeout_is_not_reported_as_bad_password(self):
+        class TimeoutIndex:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'2']
+            def fetch(self,*a):raise TimeoutError('must not leak internal details')
+            def logout(self):pass
+        with self.assertRaises(MorningInputError) as caught:
+            count_mailbox('yahoo',date(2026,11,5),{'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real'},connect=TimeoutIndex)
+        self.assertIn('ログイン後',str(caught.exception))
+        self.assertNotIn('認証に失敗',str(caught.exception))
+
 
 class DigestTests(unittest.TestCase):
     def test_requested_tone_and_all_four_platforms(self):
