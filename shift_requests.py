@@ -67,11 +67,27 @@ class ConversationStore:
         self.group_hash = hashlib.sha256(group_id.encode()).hexdigest()
 
     def load(self) -> dict:
-        page = self.client.conversations.items.list(self.conversation_id, order="desc", limit=1)
-        if not page.data:
+        after = None
+        state = None
+        for _ in range(50):
+            page = self.client.conversations.items.list(self.conversation_id, order="desc", limit=100,
+                                                       **({"after":after} if after else {}))
+            for item in page.data:
+                text = "".join(getattr(part, "text", "") for part in item.content)
+                candidate = json.loads(text)
+                if candidate.get("kind") in {"kameko_morning_ledger_v1", "kameko_morning_probe_v1"}:
+                    if candidate.get("group_hash") != self.group_hash:
+                        raise ValueError("朝の保存記録のグループが一致しません")
+                    continue
+                state = candidate
+                break
+            if state is not None or not getattr(page, "has_more", False):
+                break
+            after = getattr(page, "last_id", None)
+            if not after:
+                raise ValueError("シフト保存内容の続きを取得できません")
+        if state is None:
             raise ValueError("シフトの対象者設定がありません")
-        text = "".join(getattr(part, "text", "") for part in page.data[0].content)
-        state = json.loads(text)
         if state.get("version") != 1 or state.get("group_hash") != self.group_hash:
             raise ValueError("シフト保存先の形式またはグループが一致しません")
         if not isinstance(state.get("roster"), dict) or not isinstance(state.get("periods"), dict):
