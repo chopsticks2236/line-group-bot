@@ -52,7 +52,7 @@ def mail_window(day: date) -> tuple[datetime, datetime]:
             datetime.combine(day, time(7, 45), JST))
 
 
-def parse_schedule(text: str, filename: str) -> dict:
+def parse_schedule(text: str, filename: str, *, extra_day: date | None = None) -> dict:
     """Strict fixed-column parser for the uploaded Japanese attendance table.
 
     Cross-check ALL day columns, all four people, daily headcounts and monthly
@@ -128,8 +128,13 @@ def parse_schedule(text: str, filename: str) -> dict:
     actual = [len(entries[n]) for n in range(1, days+1)]
     if len(expected) != days+1 or [0 if x == "-" else int(x) for x in expected] != actual+[sum(actual)]:
         raise MorningInputError("シフトPDFの出勤人数が読み取り結果と一致しないよ")
+    confirmed_days = set(range(first, last+1))
+    if extra_day is not None:
+        if (extra_day.year, extra_day.month) != (year, month):
+            raise MorningInputError("追加確認日の年月がシフトPDFと一致しないよ")
+        confirmed_days.add(extra_day.day)
     return {"start": start.isoformat(), "end": end.isoformat(),
-            "days": {date(year, month, n).isoformat(): entries[n] for n in range(first, last+1)}}
+            "days": {date(year, month, n).isoformat(): entries[n] for n in sorted(confirmed_days)}}
 
 
 def _openai(client: httpx.Client, path: str, **kwargs):
@@ -141,7 +146,7 @@ def _openai(client: httpx.Client, path: str, **kwargs):
         raise MorningInputError("OpenAI Storageのシフト取得に失敗したよ") from exc
 
 
-def load_attendance(day: date, api_key: str, vector_store: str) -> list[dict]:
+def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str = "") -> list[dict]:
     if not api_key or not vector_store:
         raise MorningInputError("OpenAI Storageへの接続設定が未入力だよ")
     with httpx.Client(base_url="https://api.openai.com/v1", headers={"Authorization": f"Bearer {api_key}"}, timeout=20) as c:
@@ -164,7 +169,8 @@ def load_attendance(day: date, api_key: str, vector_store: str) -> list[dict]:
             if not match:
                 continue
             y, m, a, b = map(int, match.groups())
-            if date(y,m,a) <= day <= date(y,m,b):
+            explicitly_confirmed = extra_date == day.isoformat() and (y, m) == (day.year, day.month)
+            if date(y,m,a) <= day <= date(y,m,b) or explicitly_confirmed:
                 matches.append((item['id'], filename))
         if len(matches) != 1:
             raise MorningInputError("今日を含む確定シフトPDFがないか、対象期間が重複しているよ")
@@ -173,7 +179,8 @@ def load_attendance(day: date, api_key: str, vector_store: str) -> list[dict]:
         if page.get("has_more"):
             raise MorningInputError("シフトPDFの内容が複数ページに分かれているよ。確認が必要だよ")
         text = "\n".join(row.get("text", "") for row in page.get("data", []))
-        return parse_schedule(text, filename)["days"][day.isoformat()]
+        extra_day = day if extra_date == day.isoformat() else None
+        return parse_schedule(text, filename, extra_day=extra_day)["days"][day.isoformat()]
 
 
 def sale_candidate(sender: str, subject: str, platforms) -> str | None:
@@ -260,7 +267,13 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
                 except ValueError as exc:
                     raise MorningInputError("YAHOOの読み取り開始位置の設定が不正だよ") from exc
                 if start < track_from:
-                    raise MorningInputError("YAHOOの読み取り開始日より前の期間は集計できないよ")
+                    # One explicitly authorized initial day can use the complete
+                    # read-only metadata index. Never fake earlier coverage by
+                    # moving TRACK_FROM back while keeping the same starting UID.
+                    if env.get("YAHOO_IMAP_BACKFILL_DATE", "") == day.isoformat():
+                        use_cursor = False
+                    else:
+                        raise MorningInputError("YAHOOの読み取り開始日より前の期間は集計できないよ")
                 typ, status_rows = connection.status(folder, "(UIDNEXT UIDVALIDITY)")
                 raw_status = b" ".join(row for row in (status_rows or []) if isinstance(row, bytes))
                 validity = re.search(rb"\bUIDVALIDITY ([0-9]+)\b", raw_status)
@@ -272,7 +285,7 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL)
                 last_uid = int(uid_next.group(1)) - 1
                 if last_uid < first_uid - 1:
                     raise MorningInputError("YAHOOのメール番号が開始位置より前に戻っているよ")
-            elif expected_count > 500000:
+            if not use_cursor and expected_count > 500000:
                 raise MorningInputError("YAHOOの受信箱が大きすぎるため、販売通知専用フォルダーでの設定が必要だよ")
             uids = []
             if expected_count and (not use_cursor or last_uid >= first_uid):
@@ -383,7 +396,8 @@ def build_digest(day: date, shifts: list[dict], counts: dict) -> str:
             return f"{int(hour)}:{minute}"
         lines = ["今日の出勤は"] + [f"{s['name']}{short(s['start'])}〜{short(s['end'])}" for s in shifts] + ["だよ😊"]
     else:
-        lines = ["今日の出勤予定はなしだよ"]
+        lines = ["今日はみんなお休みだよ😊"]
+    lines = ["おはようございます😊", ""] + lines
     lines += ["", "発送件数は"] + [f"{p}{counts[p]}件" for p in PLATFORMS] + ["だよ✨"]
     a, b = mail_window(day)
     lines += ["", f"※{a.month}/{a.day} 9:00〜{b.month}/{b.day} 7:45に届いた支払い済み販売通知の件数だよ。", "発送済み・キャンセルは取引画面でも確認してね"]
@@ -396,7 +410,7 @@ def collect(day: date, env=None) -> dict:
     if missing:
         raise MorningInputError("メール接続設定が未入力だよ: " + " / ".join(missing))
     with ThreadPoolExecutor(max_workers=3) as pool:
-        shift_future = pool.submit(load_attendance, day, env.get("OPENAI_API_KEY", ""), env.get("OPENAI_VECTOR_STORE_ID", ""))
+        shift_future = pool.submit(load_attendance, day, env.get("OPENAI_API_KEY", ""), env.get("OPENAI_VECTOR_STORE_ID", ""), env.get("MORNING_SHIFT_EXTRA_DATE", ""))
         gmail_future = pool.submit(count_mailbox, "gmail", day, env)
         yahoo_future = pool.submit(count_mailbox, "yahoo", day, env)
         shifts = shift_future.result()
