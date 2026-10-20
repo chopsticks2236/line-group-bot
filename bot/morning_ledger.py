@@ -19,7 +19,8 @@ import httpx
 from openai import OpenAI
 
 from bot.morning import (MorningInputError, PLATFORMS, build_digest,
-                         count_mailbox, load_attendance, morning_retry_key)
+                         count_mailbox, load_attendance, mail_window, morning_retry_key)
+from bot.morning_timing import notification_time, window_policy
 
 KIND = "kameko_morning_ledger_v1"
 PROBE_KIND = "kameko_morning_probe_v1"
@@ -166,8 +167,24 @@ def aggregate(state, day):
     return totals,date.fromisoformat(pending[0])
 
 
+def check_window_policy(state, env):
+    """Allow a future cutover only; never reinterpret already-collected mail."""
+    try:
+        policy = window_policy(env)
+        old = state.get('mail_window_policy', window_policy({}))
+        if old != policy:
+            for value in state['days']:
+                day = date.fromisoformat(value)
+                if mail_window(day,mode=state['window_mode'],env=old) != mail_window(day,mode=state['window_mode'],env=policy):
+                    raise MorningInputError("集計済み期間の締め時刻は変更できないよ。切り替え日を確認してね")
+        return policy
+    except (TypeError, ValueError) as exc:
+        raise MorningInputError("朝の集計締め時刻・切り替え日の設定が不正だよ") from exc
+
+
 def prepare(day, state, env):
     state = copy.deepcopy(state)
+    state['mail_window_policy'] = check_window_policy(state,env)
     previous = date.fromisoformat(state['collected_through'])
     if previous > day or (day-previous).days > 31:
         raise MorningInputError("未集計期間が31日を超えるか、集計済み日より前の日付だよ。確認が必要だよ")
@@ -179,9 +196,13 @@ def prepare(day, state, env):
         cursor += timedelta(days=1)
     state['days'][day.isoformat()]['workday'] = bool(shifts)
     totals, first = aggregate(state,day)
-    text = build_digest(day,shifts,totals,first_day=first,window_mode=state['window_mode'])
+    text = build_digest(day,shifts,totals,first_day=first,window_mode=state['window_mode'],env=env)
+    first_start,_ = mail_window(first,mode=state['window_mode'],env=env)
+    _,last_end = mail_window(day,mode=state['window_mode'],env=env)
     return state, {'date':day.isoformat(),'attendance':shifts,'counts':totals,'text':text,
                    'first_day':first.isoformat(),'would_send':bool(shifts),
+                   'window_start':first_start.isoformat(),'window_end':last_end.isoformat(),
+                   'send_time':notification_time(env).strftime('%H:%M'),
                    'digest_hash':hashlib.sha256(text.encode()).hexdigest()}
 
 
@@ -199,6 +220,7 @@ def run_workday_morning(day, *, dry_run=False, env=None):
         state = store.load(start,mode)
         if not dry_run and state['sent_through'] >= day.isoformat():
             return {'ok':True,'status':'already_sent','date':day.isoformat()}
+        check_window_policy(state,env)
         cached = state['days'].get(day.isoformat())
         if not dry_run and cached and cached.get('workday') is False:
             return {'ok':True,'status':'holiday_accumulated','date':day.isoformat(),'notification_sent':False}
