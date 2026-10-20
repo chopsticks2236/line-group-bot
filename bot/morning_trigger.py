@@ -1,4 +1,4 @@
-"""GitHub runner: warm Render before 08:00 JST, retry idempotently.
+"""GitHub runner: wait locally, warm Render before the JST target, retry safely.
 
 Uses only stdlib. Do not print response bodies containing employee schedules
 or request headers containing the secret. Runs independently of monthly jobs.
@@ -11,6 +11,8 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+
+from bot.morning_timing import notification_time
 
 BASE = "https://line-group-bot-r3yl.onrender.com"
 JST = timezone(timedelta(hours=9))
@@ -42,6 +44,7 @@ def main():
     secret = os.environ.get("CRON_SECRET", "")
     if not secret:
         raise SystemExit("CRON_SECRET is missing")
+    print(f"Runner started: {datetime.now(JST).isoformat()}; schedule={os.getenv('TRIGGER_SCHEDULE','manual')}", flush=True)
     if os.getenv("DIAGNOSTIC", "false").lower() == "true":
         day = os.getenv("TEST_DATE", "")
         # Use this for three live dependency/payload checks; never claim delivery.
@@ -53,17 +56,16 @@ def main():
                 raise SystemExit(f"diagnostic {number}/3 failed (details in authenticated endpoint)")
             if not result.get("ok") or result.get("status") != "dry_run_validated":
                 raise SystemExit(f"diagnostic {number}/3 did not validate")
-            print(f"diagnostic {number}/3 passed; no message sent")
+            print(f"diagnostic {number}/3 passed; no message sent", flush=True)
+            print(json.dumps({k:result[k] for k in ('send_time','window_start','window_end','would_send') if k in result}), flush=True)
         return
     now = datetime.now(JST)
-    target = now.replace(hour=8, minute=0, second=0, microsecond=0)
-    if now.hour < 7 or now.hour >= 12:
+    send_at = notification_time()
+    target = now.replace(hour=send_at.hour, minute=send_at.minute, second=0, microsecond=0)
+    if now.hour < 4 or now.hour >= 12:
         print("Outside morning runner window; no send")
         return
-    try:
-        call("/")
-    except Exception:
-        print("Initial warm-up failed; retrying before target")
+    print(f"Target: {target.isoformat()}; waiting on GitHub, not keeping Render awake", flush=True)
     time.sleep(max(0, (target-datetime.now(JST)).total_seconds()-180))
     try:
         call("/")
