@@ -2,11 +2,13 @@ name: Kameko morning digest
 
 on:
   schedule:
-    # JST 07:47, 07:52, 07:57. Warm before 08:00, independent of monthly jobs.
-    - cron: "47,52,57 22 * * *"
-    # Delayed-start / outage recovery within the morning send window.
-    - cron: "13,33 23 * * *"
-    - cron: "13 0 * * *"
+    # JST 04:17 / 05:17 / 06:17: reserve a runner well before 07:00.
+    # The first available runner waits locally; Render wakes only at 06:57.
+    # This cushions scheduler delays but cannot guarantee an exact delivery time.
+    - cron: "17 19-21 * * *"
+    # JST 06:47 / 07:13 / 08:13: delayed-start / outage recovery.
+    - cron: "47 21 * * *"
+    - cron: "13 22,23 * * *"
   workflow_dispatch:
     inputs:
       diagnostic:
@@ -28,7 +30,7 @@ concurrency:
 jobs:
   morning:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 190
     steps:
       - uses: actions/checkout@v4
       - name: Warm Render and run morning digest
@@ -36,4 +38,7 @@ jobs:
           CRON_SECRET: ${{ secrets.CRON_SECRET }}
           DIAGNOSTIC: ${{ inputs.diagnostic || 'false' }}
           TEST_DATE: ${{ inputs.date }}
-        run: python bot/morning_trigger.py
+          MORNING_SEND_TIME: "07:00"
+          MORNING_CUTOFF_TIME: "06:45"
+          TRIGGER_SCHEDULE: ${{ github.event.schedule }}
+        run: python -m bot.morning_trigger
