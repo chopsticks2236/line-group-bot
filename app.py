@@ -91,6 +91,10 @@ def health():
             "morning_notification_enabled": morning_enabled(),
             "morning_workday_only": os.getenv("MORNING_WORKDAY_ONLY", "0").lower() in {"1","true","yes"},
             "morning_window_mode": os.getenv("MORNING_WINDOW_MODE", "legacy"),
+            "morning_send_time": os.getenv("MORNING_SEND_TIME", "08:00"),
+            "morning_cutoff_time": os.getenv("MORNING_CUTOFF_TIME", "07:45"),
+            "morning_cutoff_change_date": os.getenv("MORNING_CUTOFF_CHANGE_DATE", ""),
+            "morning_previous_cutoff_time": os.getenv("MORNING_PREVIOUS_CUTOFF_TIME", "07:45"),
         }
     )
 
