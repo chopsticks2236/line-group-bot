@@ -121,6 +121,19 @@ class LedgerTests(unittest.TestCase):
         self.run_day('2026-11-05');self.run_day('2026-11-06')
         self.assertIn('ラクマ1件',self.push.call_args.args[1])
 
+    def test_rare_sales_on_holidays_add_notice_only_to_next_workday_digest(self):
+        self.mail['2026-11-05']={'ラクマ':['a'],'Yahoo!フリマ':['b']}
+        self.run_day('2026-11-05')
+        self.push.assert_not_called()
+        self.work('2026-11-06')
+        self.run_day('2026-11-06')
+        text=self.push.call_args.args[1]
+        self.assertIn('ラクマ1件',text)
+        self.assertIn('Yahoo!フリマ1件',text)
+        self.assertIn('ラクマとYahoo!フリマで売れているよ！見落としやすいから、発送忘れに気をつけてね😊',text)
+        self.assertIn('お休み中の未通知分',text)
+        self.assertEqual(self.push.call_count,1)
+
     def test_confirmed_three_replaces_read_three_not_plus_three(self):
         self.env['MORNING_CONFIRMED_COUNTS']=json.dumps({'2026-11-05':{'ヤフオク':3}})
         self.mail['2026-11-05']={'ヤフオク':['a','b','c']}
