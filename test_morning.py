@@ -276,6 +276,26 @@ class DigestTests(unittest.TestCase):
         self.assertIn('発送件数は',result)
         self.assertNotIn('今日の出勤は',result)
 
+    def test_rare_sale_notice_names_only_platforms_with_positive_counts(self):
+        for rakuma, yahoo, names in [(1,0,'ラクマ'),(0,1,'Yahoo!フリマ'),(2,3,'ラクマとYahoo!フリマ')]:
+            with self.subTest(rakuma=rakuma,yahoo=yahoo):
+                counts=dict(zip(PLATFORMS,[0,rakuma,yahoo,0]))
+                result=build_digest(date(2026,11,5),[],counts)
+                self.assertIn(names+'で売れているよ！見落としやすいから、発送忘れに気をつけてね😊',result)
+                self.assertEqual(result.count('発送忘れに気をつけてね'),1)
+                self.assertLess(result.index('発送件数は'),result.index('見落としやすいから'))
+                if rakuma==0:
+                    self.assertNotIn('ラクマで売れているよ',result)
+                if yahoo==0:
+                    self.assertNotIn('Yahoo!フリマで売れているよ',result)
+
+    def test_no_rare_sale_notice_for_zero_or_only_other_platform_sales(self):
+        for mercari, auction in [(0,0),(3,0),(0,4),(3,4)]:
+            with self.subTest(mercari=mercari,auction=auction):
+                result=build_digest(date(2026,11,5),[],dict(zip(PLATFORMS,[mercari,0,0,auction])))
+                self.assertNotIn('見落としやすいから',result)
+                self.assertNotIn('発送忘れに気をつけてね',result)
+
     def test_all_platforms_must_succeed(self):
         with self.assertRaises(MorningInputError):
             build_digest(date(2026,11,5),[],{'メルカリ':0})
