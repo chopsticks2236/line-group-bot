@@ -415,6 +415,9 @@ def build_digest(day: date, shifts: list[dict], counts: dict, *, first_day=None,
         lines = ["今日はみんなお休みだよ😊"]
     lines = ["おはようございます😊", ""] + lines
     lines += ["", "発送件数は"] + [f"{p}{counts[p]}件" for p in PLATFORMS] + ["だよ✨"]
+    rare_sales = [platform for platform in ("ラクマ", "Yahoo!フリマ") if counts[platform] > 0]
+    if rare_sales:
+        lines += ["", f"{'と'.join(rare_sales)}で売れているよ！見落としやすいから、発送忘れに気をつけてね😊"]
     a, _ = mail_window(first_day or day, mode=window_mode, env=env)
     _, b = mail_window(day, mode=window_mode, env=env)
     if first_day and first_day < day:
