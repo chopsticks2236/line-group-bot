@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import calendar
 import hashlib
+import html
 import imaplib
 import json
 import os
@@ -26,17 +27,18 @@ from bot.morning_timing import cutoff_time, notification_time
 
 JST = timezone(timedelta(hours=9))
 PLATFORMS = ("メルカリ", "ラクマ", "Yahoo!フリマ", "ヤフオク")
+MAIL_RULESET_VERSION = 2
 PEOPLE = {"上元": "上元さん", "小山": "小山さん", "比嘉": "育子さん", "与久田": "与久田さん"}
 SENDERS = {
     "メルカリ": {"no-reply@mercari.jp"},
     "ラクマ": {"noreply@fril.jp"},
-    "Yahoo!フリマ": {"paypayfleamarket-master@mail.yahoo.co.jp"},
+    "Yahoo!フリマ": {"paypay-fleamarket@mail.yahoo.co.jp", "paypayfleamarket-master@mail.yahoo.co.jp"},
     "ヤフオク": {"auction-master@mail.yahoo.co.jp"},
 }
 SUBJECTS = {
-    "メルカリ": r"^【メルカリ】(?:商品が売れました|商品が購入されました|購入者の支払いが完了しました)",
+    "メルカリ": r"^【メルカリ】(?:「.+」の発送をお願いします$|商品が売れました|商品が購入されました|購入者の支払いが完了しました)",
     "ラクマ": r"^\[楽天ラクマ\] 決済完了のお知らせ$",
-    "Yahoo!フリマ": r"^(?:Yahoo!|PayPay)フリマ\s*[-－]\s*(?:商品が購入されました|商品が売れました|購入されました)",
+    "Yahoo!フリマ": r"^(?:【(?:Yahoo!|PayPay)\s*フリマ】\s*|(?:Yahoo!|PayPay)\s*フリマ\s*[-－]\s*)(?:「.+」が購入されました$|商品が購入されました|商品が売れました|購入されました)",
     "ヤフオク": r"^(?:Yahoo!オークション|ヤフオク!)\s*[-－]\s*支払いが完了しました。商品を発送してください[：:]",
 }
 
@@ -195,18 +197,64 @@ def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str 
 
 
 def sale_candidate(sender: str, subject: str, platforms) -> str | None:
+    subject = unicodedata.normalize("NFKC", subject).strip()
     for platform in platforms:
         if sender.casefold() in SENDERS[platform] and re.search(SUBJECTS[platform], subject):
             return platform
     return None
 
 
+def unhandled_sale_notice(sender: str, subject: str) -> bool:
+    """Do not silently turn a changed, seller-action template into zero sales."""
+    domain = sender.casefold().rsplit('@',1)[-1]
+    official = any(domain == root or domain.endswith('.'+root)
+                   for root in ('mercari.jp','fril.jp','mail.yahoo.co.jp'))
+    subject = unicodedata.normalize('NFKC',subject).strip()
+    market = re.search(r'メルカリ|ラクマ|(?:Yahoo!|PayPay)\s*フリマ|Yahoo!オークション|ヤフオク!',subject)
+    action = re.search(r'発送をお願いします|商品を発送してください|決済完了のお知らせ|購入者の支払いが完了|「.+」が購入されました|商品が購入されました|商品が売れました',subject)
+    return bool(official and market and action)
+
+
+def seller_payment_confirmed(platform: str, subject: str, body: str) -> bool:
+    """Reject buyer receipts and unpaid-order alerts even if a title is similar."""
+    text = html.unescape(re.sub(r'<[^>]+>',' ',unicodedata.normalize('NFKC',body)))
+    pending = re.search(r'支払い待ち|入金待ち|まだ支払われていません|お支払いが完了するまで.*発送しない',text)
+    paid = re.search(r'(?:代金|お支払い|支払い).{0,16}(?:完了しました|がありました|が完了して)',text)
+    if pending and not paid:
+        return False
+    if platform == 'メルカリ':
+        return bool(paid or ('商品の発送をお願いします' in text and re.search(r'購入しました|購入されました',text)))
+    if platform == 'ラクマ':
+        return bool(re.search(r'購入者より代金のお支払いがありました|購入者.*(?:支払い|決済).*完了',text))
+    if platform == 'Yahoo!フリマ':
+        return bool(re.search(r'商品.{0,20}発送.{0,20}(?:ください|お願い)|発送(?:の)?手続き|購入者.{0,12}(?:支払い|決済).{0,12}完了',text))
+    # The auction subject itself explicitly confirms payment; buyer and unpaid
+    # auction messages never pass sale_candidate in the first place.
+    return True
+
+
+def merge_mail_results(results) -> dict:
+    keys = {p:set() for p in PLATFORMS}
+    for result in results:
+        if set(result.get('counts',{})) != set(result.get('keys',{})) or not set(result.get('keys',{})) <= set(PLATFORMS):
+            raise MorningInputError('メール集計の取引キーと件数が一致しないよ')
+        for platform in PLATFORMS:
+            values = result['keys'].get(platform,[])
+            if (not isinstance(values,list) or len(values) != len(set(values))
+                    or result['counts'].get(platform,0) != len(values)
+                    or any(not isinstance(v,str) or not re.fullmatch(r'[0-9a-f]{64}',v) for v in values)):
+                raise MorningInputError('メール集計の取引キーと件数が一致しないよ')
+            keys[platform].update(values)
+    return {'counts':{p:len(values) for p,values in keys.items()},
+            'keys':{p:sorted(values) for p,values in keys.items()}}
+
+
 def transaction_id(platform: str, subject: str, body: str) -> str:
-    text = subject + "\n" + body
+    text = html.unescape(unicodedata.normalize('NFKC',subject + "\n" + body))
     patterns = {
         "メルカリ": [r"(?:mercari\.com|mercari\.jp)/(?:jp/)?(?:transaction|item)/([A-Za-z0-9_-]+)", r"商品ID\s*[：:]\s*(m\d+)"],
         "ラクマ": [r"オーダーID\s*[：:]?\s*(\d+)", r"fril\.jp/(?:sell|buy)/(\d+)"],
-        "Yahoo!フリマ": [r"paypayfleamarket\.yahoo\.co\.jp/(?:item|transaction)/([A-Za-z0-9_-]+)"],
+        "Yahoo!フリマ": [r"paypayfleamarket\.yahoo\.co\.jp/(?:item|transaction)/([A-Za-z0-9_-]+)", r"商品ID\s*[：:]\s*([a-z]\d{8,})"],
         "ヤフオク": [r"auctions\.yahoo\.co\.jp/(?:jp/)?auction/([A-Za-z0-9_-]+)", r"\(([a-z]\d{8,})\)"],
     }
     for pattern in patterns[platform]:
@@ -241,7 +289,9 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL,
     user, password = env.get(f"{prefix}_IMAP_USER", ""), env.get(f"{prefix}_IMAP_PASSWORD", "")
     if not user or not password:
         raise MorningInputError(f"{prefix}_IMAP_USER / {prefix}_IMAP_PASSWORD が未入力だよ")
-    platforms = ("メルカリ", "ラクマ") if provider == "gmail" else ("Yahoo!フリマ", "ヤフオク")
+    # A marketplace is not tied to a recipient account. Search both mailboxes
+    # for all four services, then union transaction hashes across mailboxes.
+    platforms = PLATFORMS
     host = "imap.gmail.com" if provider == "gmail" else "imap.mail.yahoo.co.jp"
     start, end = mail_window(day, mode=env.get("MORNING_WINDOW_MODE", "legacy"), env=env)
     found = {platform: set() for platform in platforms}
@@ -341,7 +391,8 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL,
                 del metadata_rows, seen
         else:
             stage = "search"
-            senders = sorted({sender for p in platforms for sender in SENDERS[p]})
+            senders = sorted({sender for p in platforms for sender in SENDERS[p]} |
+                             {'mercari.jp','fril.jp','mail.yahoo.co.jp'})
             query = [f'FROM "{s}"' for s in senders]
             joined = query[-1]
             for part in reversed(query[:-1]):
@@ -372,13 +423,24 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL,
             subject = str(message.get("Subject", ""))
             platform = sale_candidate(sender, subject, platforms)
             if not platform:
+                if unhandled_sale_notice(sender,subject):
+                    raise MorningInputError('未対応の販売通知らしいメールを見つけたよ。0件として扱わず、管理者による形式確認が必要だよ')
                 continue
             stage = "body"
             typ, fetched = connection.uid("FETCH", uid, '(BODY.PEEK[]<0.262144>)')
             parts = [row[1] for row in (fetched or []) if isinstance(row, tuple)]
             if typ != "OK" or len(parts) != 1:
                 raise MorningInputError(f"{prefix}の販売通知の取得に失敗したよ")
-            found[platform].add(transaction_id(platform, subject, _mail_text(parts[0])))
+            body = _mail_text(parts[0])
+            if not seller_payment_confirmed(platform,subject,body):
+                # A known seller subject without sufficient confirmation is an
+                # input error, not a silent zero. Explicitly unpaid orders are
+                # the only exception; wait for their later paid notification.
+                plain = unicodedata.normalize('NFKC',body)
+                if re.search(r'支払い待ち|入金待ち|まだ支払われていません',plain):
+                    continue
+                raise MorningInputError(f'{platform}のメールが支払い済みの出品者向け通知か確認できなかったよ。形式を確認してね')
+            found[platform].add(transaction_id(platform, subject, body))
         counts = {platform: len(ids) for platform, ids in found.items()}
         if include_keys:
             keys = {platform: sorted(hashlib.sha256(f"{platform}:{trade}".encode()).hexdigest()
@@ -433,10 +495,10 @@ def collect(day: date, env=None) -> dict:
         raise MorningInputError("メール接続設定が未入力だよ: " + " / ".join(missing))
     with ThreadPoolExecutor(max_workers=3) as pool:
         shift_future = pool.submit(load_attendance, day, env.get("OPENAI_API_KEY", ""), env.get("OPENAI_VECTOR_STORE_ID", ""), env.get("MORNING_SHIFT_EXTRA_DATE", ""))
-        gmail_future = pool.submit(count_mailbox, "gmail", day, env)
-        yahoo_future = pool.submit(count_mailbox, "yahoo", day, env)
+        gmail_future = pool.submit(count_mailbox, "gmail", day, env, include_keys=True)
+        yahoo_future = pool.submit(count_mailbox, "yahoo", day, env, include_keys=True)
         shifts = shift_future.result()
-        counts = {**gmail_future.result(), **yahoo_future.result()}
+        counts = merge_mail_results([gmail_future.result(),yahoo_future.result()])['counts']
     text = build_digest(day, shifts, counts, env=env)
     return {"date":day.isoformat(), "attendance":shifts, "counts":counts, "text":text,
             "digest_hash":hashlib.sha256(text.encode()).hexdigest()}
