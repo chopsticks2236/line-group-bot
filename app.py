@@ -24,7 +24,7 @@ from bot.ai_reply import apply_setting_command, clean_question, generate_reply, 
 from bot.db import get_setting, init_db, recent_messages, save_message
 from bot.line_api import extract_source, get_profile_name, push_text, reply_text
 from bot.scheduler import JST, run_daily_schedules
-from bot.morning import enabled as morning_enabled, run_morning
+from bot.morning import MAIL_RULESET_VERSION, enabled as morning_enabled, run_morning
 from shift_requests import handle_shift_message, is_shift_related
 
 logging.basicConfig(
@@ -95,6 +95,8 @@ def health():
             "morning_cutoff_time": os.getenv("MORNING_CUTOFF_TIME", "07:45"),
             "morning_cutoff_change_date": os.getenv("MORNING_CUTOFF_CHANGE_DATE", ""),
             "morning_previous_cutoff_time": os.getenv("MORNING_PREVIOUS_CUTOFF_TIME", "07:45"),
+            "morning_mail_rules_version": MAIL_RULESET_VERSION,
+            "morning_mailbox_scope": "all_marketplaces_in_both_mailboxes",
         }
     )
 
@@ -182,6 +184,14 @@ def cron_morning():
     if not config.CRON_SECRET or config.CRON_SECRET in {"change-me", "change-me-to-random-string"} or not hmac.compare_digest(secret, config.CRON_SECRET):
         abort(401)
     test_day = None
+    recount_from = None
+    if request.args.get('recount_from'):
+        if request.method != 'GET' or not request.args.get('date'):
+            return jsonify({'ok':False,'error':'recount_from requires GET and date'}),400
+        try:
+            recount_from = date.fromisoformat(request.args['recount_from'])
+        except ValueError:
+            return jsonify({'ok':False,'error':'invalid recount_from'}),400
     if request.args.get("date"):
         if request.method != "GET":
             return jsonify({"ok":False,"error":"date is available only for GET diagnostics"}), 400
@@ -190,10 +200,16 @@ def cron_morning():
         except ValueError:
             return jsonify({"ok":False,"error":"invalid date"}), 400
     with _schedule_lock:
-        result = run_morning(dry_run=request.method == "GET", day=test_day)
+        if recount_from is not None:
+            from bot.morning_ledger import recount_morning
+            result = recount_morning(recount_from,test_day)
+        else:
+            result = run_morning(dry_run=request.method == "GET", day=test_day)
     # No private attendance, mail contents or credentials in application logs.
     log.info("morning check: ok=%s status=%s", result.get("ok"), result.get("status"))
-    return jsonify(result), 200 if result.get("ok") else 502
+    response = jsonify(result)
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 200 if result.get("ok") else 502
 
 
 def _mention_user_ids(event: MessageEvent) -> list[str]:
