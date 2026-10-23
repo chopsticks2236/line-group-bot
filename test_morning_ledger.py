@@ -239,5 +239,19 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(result['first_day'],'2026-11-06')
         self.assertEqual(self.state(),before);self.push.assert_not_called()
 
+    def test_date_scoped_exception_bypasses_cached_holiday_without_duplicate_send(self):
+        self.run_day('2026-11-05')
+        self.assertFalse(self.state()['days']['2026-11-05']['workday'])
+        self.env['MORNING_ATTENDANCE_OVERRIDES']=json.dumps({'2026-11-05':[
+            {'name':'上元さん','start':'12:00','end':'未定'}]})
+        # Restore the real exception/PDF selector; the override needs no PDF.
+        from bot.morning import load_attendance
+        with patch('bot.morning_ledger.load_attendance',side_effect=load_attendance):
+            self.assertEqual(self.run_day('2026-11-05')['status'],'sent')
+        self.assertIn('上元さん12:00〜未定',self.push.call_args.args[1])
+        self.assertEqual(self.run_day('2026-11-05')['status'],'already_sent')
+        self.assertEqual(self.run_day('2026-11-06')['status'],'holiday_accumulated')
+        self.assertEqual(self.push.call_count,1)
+
 
 if __name__=='__main__':unittest.main()
