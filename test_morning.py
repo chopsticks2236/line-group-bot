@@ -1,4 +1,5 @@
 import calendar
+import hashlib
 import json
 import unittest
 from datetime import date, datetime, timedelta
@@ -8,7 +9,8 @@ from unittest.mock import patch
 from bot.morning import (JST, MorningInputError, PLATFORMS, build_digest,
                          collect, count_mailbox, mail_window,
                          morning_retry_key, parse_schedule, run_morning,
-                         sale_candidate, transaction_id)
+                         sale_candidate, transaction_id, seller_payment_confirmed,
+                         merge_mail_results, unhandled_sale_notice)
 
 
 def schedule_fixture():
@@ -72,6 +74,69 @@ class ScheduleTests(unittest.TestCase):
 
 
 class MailTests(unittest.TestCase):
+    def test_verified_marketplace_templates_in_either_mailbox(self):
+        # Sanitized versions of real seller templates; never real order data.
+        fixtures = [
+            ('メルカリ','no-reply@mercari.jp','【メルカリ】「テスト商品」の発送をお願いします',
+             '下記の商品をテストさんが購入しました。\n商品の発送をお願いします。\n商品ID : m12345678901'),
+            ('ラクマ','noreply@fril.jp','[楽天ラクマ] 決済完了のお知らせ',
+             '下記の商品について購入者より代金のお支払いがありました。\nオーダーID : 1234567890'),
+            ('Yahoo!フリマ','paypay-fleamarket@mail.yahoo.co.jp','【Yahoo!フリマ】「テスト商品」が購入されました',
+             '下記商品が購入されました。発送の手続きを進めてください。\n商品ID : z123456789\n商品ページ：https://paypayfleamarket.yahoo.co.jp/item/z123456789'),
+            ('ヤフオク','auction-master@mail.yahoo.co.jp','Yahoo!オークション - 支払いが完了しました。商品を発送してください：テスト(a1234567890)',
+             '取引を確認して発送してください'),
+        ]
+        records = {}
+        for i,(platform,sender,subject,body) in enumerate(fixtures,1):
+            self.assertEqual(sale_candidate(sender,subject,PLATFORMS),platform)
+            self.assertTrue(seller_payment_confirmed(platform,subject,body))
+            m=EmailMessage();m['From']=sender;m['Subject']=subject;m.set_content(body)
+            records[str(i).encode()]=m.as_bytes()
+        class IMAP:
+            def __init__(self,*a,**k):pass
+            def login(self,*a):pass
+            def select(self,*a,**k):return 'OK',[b'4']
+            def fetch(self,*a):
+                return 'OK',[b'1 (UID '+uid+b' INTERNALDATE "04-Nov-2026 12:00:00 +0900")' for uid in records]
+            def uid(self,command,*args):
+                if command=='SEARCH':return 'OK',[b'1 2 3 4']
+                return 'OK',[(b'1 (INTERNALDATE "04-Nov-2026 12:00:00 +0900")',records[args[0]])]
+            def logout(self):pass
+        results=[]
+        for provider in ('gmail','yahoo'):
+            prefix=provider.upper()
+            result=count_mailbox(provider,date(2026,11,5),{prefix+'_IMAP_USER':'test@example.com',prefix+'_IMAP_PASSWORD':'test'},connect=IMAP,include_keys=True)
+            self.assertEqual(result['counts'],dict.fromkeys(PLATFORMS,1))
+            results.append(result)
+        self.assertEqual(merge_mail_results(results)['counts'],dict.fromkeys(PLATFORMS,1))
+
+    def test_buyer_receipts_shipping_ads_and_unpaid_are_excluded(self):
+        for sender,subject in [
+            ('no-reply@mercari.jp','【メルカリ】ご購入ありがとうございます'),
+            ('no-reply@mercari.jp','【メルカリ】発送されていない商品があります'),
+            ('noreply@fril.jp','[楽天ラクマ] ご購入ありがとうございます'),
+            ('noreply@fril.jp','[楽天ラクマ] 発送のご連絡'),
+            ('paypay-fleamarket@mail.yahoo.co.jp','【Yahoo!フリマ】「テスト商品」が発送されました'),
+            ('paypay-fleamarket@mail.yahoo.co.jp','Yahoo!フリマ - 取引メッセージ：テスト商品(z123456789)'),
+            ('ppfleama-news@mail.yahoo.co.jp','Yahoo!フリマ お得なクーポン'),
+            ('auction-master@mail.yahoo.co.jp','Yahoo!オークション - お届け先住所確定'),
+        ]:
+            with self.subTest(subject=subject):
+                self.assertIsNone(sale_candidate(sender,subject,PLATFORMS))
+                self.assertFalse(unhandled_sale_notice(sender,subject))
+        for platform in PLATFORMS:
+            self.assertFalse(seller_payment_confirmed(platform,'','まだ支払われていません。支払い待ちです。'))
+
+    def test_changed_official_seller_template_is_not_silently_zero(self):
+        self.assertTrue(unhandled_sale_notice('new-sender@mercari.jp','【メルカリ】「テスト」の発送をお願いします'))
+        self.assertTrue(unhandled_sale_notice('new-sender@mail.yahoo.co.jp','【Yahoo!フリマ】「テスト」が購入されました'))
+        self.assertFalse(unhandled_sale_notice('phishing@example.com','【メルカリ】「テスト」の発送をお願いします'))
+
+    def test_merge_rejects_count_mismatch(self):
+        keys={p:[] for p in PLATFORMS};counts=dict.fromkeys(PLATFORMS,0)
+        keys['メルカリ']=[hashlib.sha256(b'test').hexdigest()]
+        with self.assertRaises(MorningInputError):merge_mail_results([{'keys':keys,'counts':counts}])
+
     def test_window_rolls_month_and_year(self):
         a,b=mail_window(date(2027,1,1))
         self.assertEqual(a,datetime(2026,12,31,9,tzinfo=JST))
@@ -98,7 +163,7 @@ class MailTests(unittest.TestCase):
             m['From']='noreply@fril.jp'
             m['Subject']='[楽天ラクマ] 決済完了のお知らせ'
             m['Date']='Thu, 01 Jan 2026 00:00:00 +0000' # Ignore untrusted header date.
-            m.set_content('オーダーID：'+trade)
+            m.set_content('下記の商品について購入者より代金のお支払いがありました。\n商品の発送をお願いいたします。\nオーダーID：'+trade)
             return m.as_bytes()
         records = {
             b'1':('04-Nov-2026 08:59:59 +0900','1'), # before start
@@ -121,7 +186,7 @@ class MailTests(unittest.TestCase):
                 return 'OK',[(b'1 (INTERNALDATE "'+received.encode()+b'" BODY[] {99}',raw), b')']
             def logout(self): calls.append(('logout',))
         result=count_mailbox('gmail',date(2026,11,5),{'GMAIL_IMAP_USER':'test@example.com','GMAIL_IMAP_PASSWORD':'not-a-real-secret'},connect=FakeIMAP)
-        self.assertEqual(result,{'メルカリ':0,'ラクマ':2})
+        self.assertEqual(result,{'メルカリ':0,'ラクマ':2,'Yahoo!フリマ':0,'ヤフオク':0})
         self.assertIn(('select','INBOX',True),calls)
         self.assertTrue(all('BODY.PEEK' in call[-1] for call in calls if call[0]=='FETCH'))
         self.assertFalse(any(call[0] in {'STORE','EXPUNGE'} for call in calls))
@@ -159,7 +224,7 @@ class MailTests(unittest.TestCase):
                 return 'OK',[(b'1 (UID 3 INTERNALDATE "04-Nov-2026 09:00:00 +0900")',m.as_bytes())]
             def logout(self):pass
         result=count_mailbox('yahoo',date(2026,11,5),{'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real'},connect=FakeYahoo)
-        self.assertEqual(result,{'Yahoo!フリマ':0,'ヤフオク':1})
+        self.assertEqual(result,{'メルカリ':0,'ラクマ':0,'Yahoo!フリマ':0,'ヤフオク':1})
         self.assertIn(('FETCH','1:*','(UID INTERNALDATE)'),calls)
         self.assertEqual(len([c for c in calls if c[0]=='FETCH' and isinstance(c[1],bytes)]),2)
 
@@ -192,7 +257,7 @@ class MailTests(unittest.TestCase):
         env={'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real',
              'YAHOO_IMAP_START_UID':'100','YAHOO_IMAP_UIDVALIDITY':'77',
              'YAHOO_IMAP_TRACK_FROM':'2026-11-04T09:00:00+09:00'}
-        self.assertEqual(count_mailbox('yahoo',date(2026,11,5),env,connect=CursorYahoo),{'Yahoo!フリマ':0,'ヤフオク':0})
+        self.assertEqual(count_mailbox('yahoo',date(2026,11,5),env,connect=CursorYahoo),dict.fromkeys(PLATFORMS,0))
         self.assertEqual(len(calls),1)
 
     def test_yahoo_cursor_empty_tail_never_fetches_backwards_range(self):
@@ -206,7 +271,7 @@ class MailTests(unittest.TestCase):
         env={'YAHOO_IMAP_USER':'test@example.com','YAHOO_IMAP_PASSWORD':'not-real',
              'YAHOO_IMAP_START_UID':'100','YAHOO_IMAP_UIDVALIDITY':'77',
              'YAHOO_IMAP_TRACK_FROM':'2026-11-04T09:00:00+09:00'}
-        self.assertEqual(count_mailbox('yahoo',date(2026,11,5),env,connect=EmptyTail),{'Yahoo!フリマ':0,'ヤフオク':0})
+        self.assertEqual(count_mailbox('yahoo',date(2026,11,5),env,connect=EmptyTail),dict.fromkeys(PLATFORMS,0))
 
     def test_yahoo_cursor_rejects_pretracking_and_recreated_mailbox(self):
         class Recreated:
@@ -242,7 +307,7 @@ class MailTests(unittest.TestCase):
              'YAHOO_IMAP_START_UID':'100','YAHOO_IMAP_UIDVALIDITY':'77',
              'YAHOO_IMAP_TRACK_FROM':'2026-11-04T09:00:00+09:00',
              'YAHOO_IMAP_BACKFILL_DATE':'2026-11-04'}
-        self.assertEqual(count_mailbox('yahoo',date(2026,11,4),env,connect=BackfillYahoo),{'Yahoo!フリマ':0,'ヤフオク':0})
+        self.assertEqual(count_mailbox('yahoo',date(2026,11,4),env,connect=BackfillYahoo),dict.fromkeys(PLATFORMS,0))
         self.assertEqual(calls,[('1:*','(UID INTERNALDATE)')])
         with self.assertRaisesRegex(MorningInputError,'開始日より前'):
             count_mailbox('yahoo',date(2026,11,3),env,connect=BackfillYahoo)
@@ -377,6 +442,19 @@ class RouteTests(unittest.TestCase):
     @patch('app.run_morning')
     def test_bad_date_is_400(self,run):
         self.assertEqual(self.client.get('/cron/morning?date=bad',headers={'X-Cron-Secret':'a-test-secret'}).status_code,400)
+        run.assert_not_called()
+
+    @patch('bot.config.CRON_SECRET','a-test-secret')
+    @patch('bot.morning_ledger.recount_morning',return_value={'ok':True,'status':'recounted','notification_sent':False})
+    @patch('app.run_morning')
+    def test_recount_is_authenticated_readonly_and_not_cacheable(self,run,recount):
+        url='/cron/morning?date=2026-11-05&recount_from=2026-11-01'
+        self.assertEqual(self.client.get(url).status_code,401)
+        self.assertEqual(self.client.post(url,headers={'X-Cron-Secret':'a-test-secret'}).status_code,400)
+        response=self.client.get(url,headers={'X-Cron-Secret':'a-test-secret'})
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.headers['Cache-Control'],'no-store')
+        recount.assert_called_once_with(date(2026,11,1),date(2026,11,5))
         run.assert_not_called()
 
     @patch('bot.config.CRON_SECRET','change-me')
