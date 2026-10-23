@@ -12,14 +12,14 @@ import json
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 import httpx
 from openai import OpenAI
 
-from bot.morning import (MorningInputError, PLATFORMS, build_digest,
-                         count_mailbox, load_attendance, mail_window, morning_retry_key)
+from bot.morning import (JST, MAIL_RULESET_VERSION, MorningInputError, PLATFORMS, build_digest,
+                         count_mailbox, load_attendance, mail_window, merge_mail_results, morning_retry_key)
 from bot.morning_timing import notification_time, window_policy
 
 KIND = "kameko_morning_ledger_v1"
@@ -131,7 +131,9 @@ def read_day(day, env):
         gmail = pool.submit(count_mailbox,'gmail',day,env,include_keys=True)
         yahoo = pool.submit(count_mailbox,'yahoo',day,env,include_keys=True)
         a,b = gmail.result(),yahoo.result()
-    row = {'counts':{**a['counts'],**b['counts']},'keys':{**a['keys'],**b['keys']},'manual':{},'workday':None}
+    row = {**merge_mail_results([a,b]),'manual':{},'workday':None,
+           'rules_version':MAIL_RULESET_VERSION,
+           'source_counts':{'gmail':a['counts'],'yahoo':b['counts']}}
     try:
         overrides = json.loads(env.get('MORNING_CONFIRMED_COUNTS','{}'))
         assert isinstance(overrides,dict)
@@ -189,6 +191,12 @@ def prepare(day, state, env):
     if previous > day or (day-previous).days > 31:
         raise MorningInputError("未集計期間が31日を超えるか、集計済み日より前の日付だよ。確認が必要だよ")
     shifts = load_attendance(day,env.get('OPENAI_API_KEY',''),env.get('OPENAI_VECTOR_STORE_ID',''),env.get('MORNING_SHIFT_EXTRA_DATE',''))
+    # Refresh only unnotified cached days after classifier/source changes.
+    # Sent receipts and uncertain outboxes retain their existing safety guards.
+    for key,row in list(state['days'].items()):
+        if state['sent_through'] < key <= day.isoformat() and row.get('rules_version') != MAIL_RULESET_VERSION:
+            state['days'][key] = read_day(date.fromisoformat(key),env)
+            state['days'][key]['workday'] = row.get('workday')
     cursor = previous + timedelta(days=1)
     while cursor <= day:
         state['days'][cursor.isoformat()] = read_day(cursor,env)
@@ -220,9 +228,20 @@ def run_workday_morning(day, *, dry_run=False, env=None):
         state = store.load(start,mode)
         if not dry_run and state['sent_through'] >= day.isoformat():
             return {'ok':True,'status':'already_sent','date':day.isoformat()}
+        if dry_run and state['sent_through'] >= day.isoformat():
+            # Replay the historical workday span in memory only. This supports
+            # validation after an already-sent digest without clearing receipts
+            # or freezing recounts into production state.
+            if state.get('outbox'):
+                raise MorningInputError('送信待ちの記録を確認してから非送信診断を行ってね')
+            state = copy.deepcopy(state)
+            prior = [key for key,row in state['days'].items() if key < day.isoformat() and row.get('workday') is True]
+            state['sent_through'] = max(prior,default=(date.fromisoformat(start)-timedelta(days=1)).isoformat())
+            state['collected_through'] = day.isoformat()
+            state['days'] = {key:row for key,row in state['days'].items() if key <= day.isoformat()}
         check_window_policy(state,env)
         cached = state['days'].get(day.isoformat())
-        if not dry_run and cached and cached.get('workday') is False:
+        if not dry_run and cached and cached.get('workday') is False and cached.get('rules_version') == MAIL_RULESET_VERSION:
             return {'ok':True,'status':'holiday_accumulated','date':day.isoformat(),'notification_sent':False}
         updated,result = prepare(day,state,env)
         if dry_run:
@@ -261,3 +280,57 @@ def run_workday_morning(day, *, dry_run=False, env=None):
         raise MorningInputError("朝の非公開集計記録の読み書きまたは通知に失敗したよ。記録を消さず停止したよ") from exc
     finally:
         store.close()
+
+
+def recount_morning(first_day, last_day, *, env=None, now=None):
+    """Read-only historical recount. Never send, save counts, or move receipts."""
+    from bot import config
+    env = os.environ if env is None else env
+    now = now or datetime.now(JST)
+    store = None
+    try:
+        start = env.get('MORNING_START_DATE','')
+        mode = env.get('MORNING_WINDOW_MODE','legacy')
+        if not start or not date.fromisoformat(start) <= first_day <= last_day or (last_day-first_day).days >= 31:
+            raise MorningInputError('再集計は通知開始日以降の連続31日以内で指定してね')
+        if mail_window(last_day,mode=mode,env=env)[1] > now.astimezone(JST):
+            raise MorningInputError('まだ締め時刻を過ぎていない期間は再集計できないよ')
+        store = get_store(env,config.LINE_GROUP_ID)
+        original = store.load(start,mode)
+        check_window_policy(original,env)
+        if original.get('outbox'):
+            raise MorningInputError('未確認の送信待ち記録があるため、再集計より先に確認が必要だよ')
+        if last_day.isoformat() > original['collected_through']:
+            raise MorningInputError('保存済みの集計期間だけを再集計できるよ')
+        updated = copy.deepcopy(original)
+        old = copy.deepcopy(original)
+        cutoff = (first_day-timedelta(days=1)).isoformat()
+        old['sent_through'] = updated['sent_through'] = cutoff
+        daily = {}
+        cursor = first_day
+        while cursor <= last_day:
+            key = cursor.isoformat()
+            if key not in original['days']:
+                raise MorningInputError('再集計対象の保存済み日次記録が見つからないよ')
+            updated['days'][key] = read_day(cursor,env)
+            daily[key] = {'previous_counts':original['days'][key]['counts'],
+                          'counts':updated['days'][key]['counts'],
+                          'source_counts':updated['days'][key]['source_counts']}
+            cursor += timedelta(days=1)
+        counts,_ = aggregate(updated,last_day)
+        previous,_ = aggregate(old,last_day)
+        begin,_ = mail_window(first_day,mode=mode,env=env)
+        _,end = mail_window(last_day,mode=mode,env=env)
+        return {'ok':True,'status':'recounted','rules_version':MAIL_RULESET_VERSION,
+                'first_day':first_day.isoformat(),'last_day':last_day.isoformat(),
+                'window_start':begin.isoformat(),'window_end':end.isoformat(),
+                'counts':counts,'previous_counts':previous,
+                'difference':{p:counts[p]-previous[p] for p in PLATFORMS},
+                'daily':daily,'notification_sent':False,'production_state_changed':False}
+    except MorningInputError as exc:
+        return {'ok':False,'status':'input_error','error':str(exc)}
+    except Exception:
+        return {'ok':False,'status':'service_error','error':'非公開の再集計でエラーが出たよ。保存記録と送信済み状態は変更していないよ'}
+    finally:
+        if store is not None:
+            store.close()
