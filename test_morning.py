@@ -10,7 +10,7 @@ from bot.morning import (JST, MorningInputError, PLATFORMS, build_digest,
                          collect, count_mailbox, mail_window,
                          morning_retry_key, parse_schedule, run_morning,
                          sale_candidate, transaction_id, seller_payment_confirmed,
-                         merge_mail_results, unhandled_sale_notice)
+                         merge_mail_results, unhandled_sale_notice, attendance_override, load_attendance)
 
 
 def schedule_fixture():
@@ -36,6 +36,27 @@ def schedule_fixture():
 
 
 class ScheduleTests(unittest.TestCase):
+    def test_private_one_day_exception_and_unknown_end_time(self):
+        shifts=[{'name':'上元さん','start':'12:00','end':'未定'}]
+        raw=json.dumps({'2026-11-05':shifts},ensure_ascii=False)
+        self.assertEqual(load_attendance(date(2026,11,5),'','',overrides=raw),shifts)
+        self.assertIsNone(attendance_override(date(2026,11,6),raw))
+        with self.assertRaisesRegex(MorningInputError,'接続設定'):
+            load_attendance(date(2026,11,6),'','',overrides=raw)
+        text=build_digest(date(2026,11,5),shifts,dict.fromkeys(PLATFORMS,0))
+        self.assertIn('上元さん12:00〜未定',text)
+        self.assertIn('おはようございます',text)
+
+    def test_bad_exception_never_becomes_a_holiday_or_a_guessed_time(self):
+        for row in [
+            {'name':'上元さん','start':'25:00','end':'未定'},
+            {'name':'上元さん','start':'12:00','end':'11:00'},
+            {'name':'上元さん','start':'12:00','end':None},
+            {'name':'不明な人','start':'12:00','end':'未定'},
+        ]:
+            with self.subTest(row=row),self.assertRaises(MorningInputError):
+                attendance_override(date(2026,11,5),json.dumps({'2026-11-05':[row]}))
+
     def test_table_with_total_cross_checks(self):
         result = parse_schedule(schedule_fixture(), "2026年11月1日から20日まで.pdf")
         self.assertEqual(len(result['days']),20)
