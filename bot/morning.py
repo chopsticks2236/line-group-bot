@@ -159,7 +159,34 @@ def _openai(client: httpx.Client, path: str, **kwargs):
         raise MorningInputError("OpenAI Storageのシフト取得に失敗したよ") from exc
 
 
-def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str = "") -> list[dict]:
+def attendance_override(day: date, raw: str = "{}") -> list[dict] | None:
+    """Private admin-only, date-scoped exceptions; never modify the source PDF."""
+    try:
+        values = json.loads(raw)
+        assert isinstance(values,dict) and len(values) <= 366
+        for key, shifts in values.items():
+            assert date.fromisoformat(key).isoformat() == key
+            assert isinstance(shifts,list) and len(shifts) <= len(PEOPLE)
+            seen = set()
+            for row in shifts:
+                assert isinstance(row,dict) and set(row) == {'name','start','end'}
+                assert row['name'] in PEOPLE.values() and row['name'] not in seen
+                seen.add(row['name'])
+                assert isinstance(row['start'],str) and re.fullmatch(r'\d{2}:\d{2}',row['start'])
+                begin = time.fromisoformat(row['start'])
+                assert isinstance(row['end'],str)
+                if row['end'] != '未定':
+                    assert re.fullmatch(r'\d{2}:\d{2}',row['end'])
+                    assert time.fromisoformat(row['end']) > begin
+        return values.get(day.isoformat())
+    except (AssertionError,ValueError,TypeError,KeyError) as exc:
+        raise MorningInputError('日付限定の臨時出勤設定が不正だよ。名前・日付・時刻を確認してね') from exc
+
+
+def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str = "", overrides: str = "{}") -> list[dict]:
+    shifts = attendance_override(day,overrides)
+    if shifts is not None:
+        return shifts
     if not api_key or not vector_store:
         raise MorningInputError("OpenAI Storageへの接続設定が未入力だよ")
     with httpx.Client(base_url="https://api.openai.com/v1", headers={"Authorization": f"Bearer {api_key}"}, timeout=20) as c:
@@ -470,6 +497,8 @@ def build_digest(day: date, shifts: list[dict], counts: dict, *, first_day=None,
         raise MorningInputError("4サービスの発送件数がそろっていないよ")
     if shifts:
         def short(value):
+            if value == '未定':
+                return value
             hour, minute = value.split(":")
             return f"{int(hour)}:{minute}"
         lines = ["今日の出勤は"] + [f"{s['name']}{short(s['start'])}〜{short(s['end'])}" for s in shifts] + ["だよ😊"]
@@ -494,7 +523,7 @@ def collect(day: date, env=None) -> dict:
     if missing:
         raise MorningInputError("メール接続設定が未入力だよ: " + " / ".join(missing))
     with ThreadPoolExecutor(max_workers=3) as pool:
-        shift_future = pool.submit(load_attendance, day, env.get("OPENAI_API_KEY", ""), env.get("OPENAI_VECTOR_STORE_ID", ""), env.get("MORNING_SHIFT_EXTRA_DATE", ""))
+        shift_future = pool.submit(load_attendance, day, env.get("OPENAI_API_KEY", ""), env.get("OPENAI_VECTOR_STORE_ID", ""), env.get("MORNING_SHIFT_EXTRA_DATE", ""), env.get("MORNING_ATTENDANCE_OVERRIDES", "{}"))
         gmail_future = pool.submit(count_mailbox, "gmail", day, env, include_keys=True)
         yahoo_future = pool.submit(count_mailbox, "yahoo", day, env, include_keys=True)
         shifts = shift_future.result()
