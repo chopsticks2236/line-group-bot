@@ -62,11 +62,11 @@ class TimingTests(unittest.TestCase):
                 message=EmailMessage()
                 message['From']='noreply@fril.jp'
                 message['Subject']='[楽天ラクマ] 決済完了のお知らせ'
-                message.set_content('オーダーID：'+trade)
+                message.set_content('下記の商品について購入者より代金のお支払いがありました。\n商品の発送をお願いいたします。\nオーダーID：'+trade)
                 return 'OK',[(b'1 (INTERNALDATE "'+received.encode()+b'")',message.as_bytes())]
             def logout(self):pass
         env={**TIMING,'GMAIL_IMAP_USER':'test@example.com','GMAIL_IMAP_PASSWORD':'not-real'}
-        self.assertEqual(count_mailbox('gmail',date(2026,10,22),env,connect=IMAP),{'メルカリ':0,'ラクマ':2})
+        self.assertEqual(count_mailbox('gmail',date(2026,10,22),env,connect=IMAP),{'メルカリ':0,'ラクマ':2,'Yahoo!フリマ':0,'ヤフオク':0})
         self.assertEqual(calls,[('readonly',True)])
 
     def test_server_sends_at_seven_not_before(self):
