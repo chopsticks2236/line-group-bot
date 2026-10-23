@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from bot.morning import JST, MorningInputError, PLATFORMS, mail_window
-from bot.morning_ledger import KIND,PROBE_KIND,LedgerStore,run_workday_morning
+from bot.morning_ledger import KIND,PROBE_KIND,LedgerStore,run_workday_morning,recount_morning
 from shift_requests import ConversationStore
 
 GROUP='test-group'
@@ -188,6 +188,56 @@ class LedgerTests(unittest.TestCase):
         state=self.state();state['group_hash']='wrong';self.items.rows.append(state)
         with self.assertRaises(MorningInputError):self.run_day('2026-11-05')
         self.push.assert_not_called()
+
+    def test_old_unnotified_cache_is_refreshed_but_sent_receipt_is_preserved(self):
+        self.work('2026-11-05');self.run_day('2026-11-05')
+        self.run_day('2026-11-06')
+        state=self.state()
+        for row in state['days'].values():row.pop('rules_version',None)
+        self.store.save(state)
+        self.mail['2026-11-05']={'メルカリ':['already-notified-period']}
+        self.mail['2026-11-06']={'メルカリ':['previously-missed']}
+        self.work('2026-11-07');self.run_day('2026-11-07')
+        self.assertIn('メルカリ1件',self.push.call_args.args[1])
+        self.assertEqual(self.state()['days']['2026-11-05'],state['days']['2026-11-05'])
+        self.assertEqual(self.state()['days']['2026-11-06']['rules_version'],2)
+
+    def test_recount_does_not_send_probe_save_or_move_production_receipts(self):
+        self.work('2026-11-05');self.run_day('2026-11-05')
+        original=self.state();before=copy.deepcopy(self.items.rows)
+        self.mail['2026-11-05']={'メルカリ':['missed-1','missed-2']}
+        result=recount_morning(date(2026,11,5),date(2026,11,5),env=self.env,
+                               now=datetime(2026,11,5,12,tzinfo=JST))
+        self.assertTrue(result['ok']);self.assertEqual(result['difference']['メルカリ'],2)
+        self.assertFalse(result['notification_sent']);self.assertFalse(result['production_state_changed'])
+        self.assertEqual(self.items.rows,before);self.assertEqual(self.state(),original)
+        self.assertEqual(self.push.call_count,1)
+
+    def test_recount_rejects_future_cutoff_and_uncertain_outbox(self):
+        self.run_day('2026-11-05')
+        result=recount_morning(date(2026,11,5),date(2026,11,5),env=self.env,
+                               now=datetime(2026,11,5,7,tzinfo=JST))
+        self.assertFalse(result['ok'])
+        state=self.state();state['outbox']={'date':'2026-11-05','digest_hash':'a'*64};self.store.save(state)
+        result=recount_morning(date(2026,11,5),date(2026,11,5),env=self.env,
+                               now=datetime(2026,11,5,12,tzinfo=JST))
+        self.assertFalse(result['ok']);self.push.assert_not_called()
+
+    def test_dry_replay_after_sent_refreshes_full_holiday_span_without_resending(self):
+        self.work('2026-11-05');self.run_day('2026-11-05')
+        self.run_day('2026-11-06');self.work('2026-11-07');self.run_day('2026-11-07')
+        state=self.state()
+        for row in state['days'].values():row.pop('rules_version',None)
+        self.store.save(state);before=self.state()
+        self.mail['2026-11-06']={'メルカリ':['a']}
+        self.mail['2026-11-07']={'メルカリ':['b']}
+        self.push.reset_mock()
+        with patch('bot.morning_ledger.httpx.Client') as client:
+            client.return_value.__enter__.return_value.post.return_value.status_code=200
+            result=self.run_day('2026-11-07',dry_run=True)
+        self.assertEqual(result['counts']['メルカリ'],2)
+        self.assertEqual(result['first_day'],'2026-11-06')
+        self.assertEqual(self.state(),before);self.push.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()
