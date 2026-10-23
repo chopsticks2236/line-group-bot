@@ -19,7 +19,7 @@ import httpx
 from openai import OpenAI
 
 from bot.morning import (JST, MAIL_RULESET_VERSION, MorningInputError, PLATFORMS, build_digest,
-                         count_mailbox, load_attendance, mail_window, merge_mail_results, morning_retry_key)
+                         attendance_override, count_mailbox, load_attendance, mail_window, merge_mail_results, morning_retry_key)
 from bot.morning_timing import notification_time, window_policy
 
 KIND = "kameko_morning_ledger_v1"
@@ -190,7 +190,7 @@ def prepare(day, state, env):
     previous = date.fromisoformat(state['collected_through'])
     if previous > day or (day-previous).days > 31:
         raise MorningInputError("未集計期間が31日を超えるか、集計済み日より前の日付だよ。確認が必要だよ")
-    shifts = load_attendance(day,env.get('OPENAI_API_KEY',''),env.get('OPENAI_VECTOR_STORE_ID',''),env.get('MORNING_SHIFT_EXTRA_DATE',''))
+    shifts = load_attendance(day,env.get('OPENAI_API_KEY',''),env.get('OPENAI_VECTOR_STORE_ID',''),env.get('MORNING_SHIFT_EXTRA_DATE',''),env.get('MORNING_ATTENDANCE_OVERRIDES','{}'))
     # Refresh only unnotified cached days after classifier/source changes.
     # Sent receipts and uncertain outboxes retain their existing safety guards.
     for key,row in list(state['days'].items()):
@@ -241,7 +241,9 @@ def run_workday_morning(day, *, dry_run=False, env=None):
             state['days'] = {key:row for key,row in state['days'].items() if key <= day.isoformat()}
         check_window_policy(state,env)
         cached = state['days'].get(day.isoformat())
-        if not dry_run and cached and cached.get('workday') is False and cached.get('rules_version') == MAIL_RULESET_VERSION:
+        if (not dry_run and cached and cached.get('workday') is False
+                and cached.get('rules_version') == MAIL_RULESET_VERSION
+                and attendance_override(day,env.get('MORNING_ATTENDANCE_OVERRIDES','{}')) is None):
             return {'ok':True,'status':'holiday_accumulated','date':day.isoformat(),'notification_sent':False}
         updated,result = prepare(day,state,env)
         if dry_run:
