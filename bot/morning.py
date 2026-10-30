@@ -512,6 +512,7 @@ def count_mailbox(provider: str, day: date, env=None, connect=imaplib.IMAP4_SSL,
 
 
 def build_digest(day: date, shifts: list[dict], counts: dict, *, first_day=None, window_mode=None, env=None) -> str:
+    env = os.environ if env is None else env
     if set(counts) != set(PLATFORMS) or any(type(v) is not int or v < 0 for v in counts.values()):
         raise MorningInputError("4サービスの発送件数がそろっていないよ")
     if shifts:
@@ -525,6 +526,19 @@ def build_digest(day: date, shifts: list[dict], counts: dict, *, first_day=None,
         lines = ["今日はみんなお休みだよ😊"]
     lines = ["おはようございます😊", ""] + lines
     lines += ["", "発送件数は"] + [f"{p}{counts[p]}件" for p in PLATFORMS] + ["だよ✨"]
+    try:
+        notice = json.loads(env.get('MORNING_ONE_TIME_NOTICE','{}'))
+        assert isinstance(notice,dict)
+        if notice:
+            assert set(notice) == {'from_date','text'}
+            anchor = date.fromisoformat(notice['from_date'])
+            assert isinstance(notice['text'],str) and 0 < len(notice['text'].strip()) <= 1000
+            # The durable sent-through receipt advances first_day after delivery.
+            # Holidays, failed sends and dry runs do not consume this notice.
+            if (first_day or day) <= anchor <= day:
+                lines += ['',notice['text'].strip()]
+    except (AssertionError,ValueError,TypeError,KeyError) as exc:
+        raise MorningInputError('次回限定のお知らせ設定が不正だよ') from exc
     rare_sales = [platform for platform in ("ラクマ", "Yahoo!フリマ") if counts[platform] > 0]
     if rare_sales:
         lines += ["", f"{'と'.join(rare_sales)}で売れているよ！見落としやすいから、発送忘れに気をつけてね😊"]
