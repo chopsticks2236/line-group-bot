@@ -75,11 +75,12 @@ def main():
     for attempt in range(5):
         try:
             result = call("/cron/morning", secret, "POST")
-            print(json.dumps({k: result[k] for k in ("ok", "status", "date") if k in result}))
+            print(json.dumps({k: result[k] for k in ("ok", "status", "date") if k in result}),flush=True)
             if result.get("ok"):
                 return
-        except Exception:
-            print(f"Morning request failed, attempt {attempt+1}/5")
+        except Exception as exc:
+            diagnostic_failure(exc)
+            print(f"Morning request failed, attempt {attempt+1}/5",flush=True)
         if attempt < 4:
             time.sleep(30)
     raise SystemExit("Morning notification failed; no unverified success reported")
