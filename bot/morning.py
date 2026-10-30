@@ -183,27 +183,44 @@ def attendance_override(day: date, raw: str = "{}") -> list[dict] | None:
         raise MorningInputError('日付限定の臨時出勤設定が不正だよ。名前・日付・時刻を確認してね') from exc
 
 
-def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str = "", overrides: str = "{}") -> list[dict]:
+def schedule_stores(primary: str, additional: str = "[]") -> list[str]:
+    """Search only explicitly configured stores, not unrelated account data."""
+    try:
+        extra = json.loads(additional)
+        assert isinstance(extra,list) and len(extra) <= 9
+        stores = [primary,*extra]
+        assert all(isinstance(x,str) and re.fullmatch(r'vs_[A-Za-z0-9]+',x) for x in stores)
+        return list(dict.fromkeys(stores))
+    except (AssertionError,TypeError,ValueError) as exc:
+        raise MorningInputError('シフトの追加保存先の設定が不正だよ。Vector store IDのJSON配列で指定してね') from exc
+
+
+def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str = "", overrides: str = "{}", additional_stores: str = "[]") -> list[dict]:
     shifts = attendance_override(day,overrides)
     if shifts is not None:
         return shifts
     if not api_key or not vector_store:
         raise MorningInputError("OpenAI Storageへの接続設定が未入力だよ")
+    stores = schedule_stores(vector_store,additional_stores)
     with httpx.Client(base_url="https://api.openai.com/v1", headers={"Authorization": f"Bearer {api_key}"}, timeout=20) as c:
-        files, after = [], None
-        while True:
-            page = _openai(c, f"/vector_stores/{vector_store}/files", params={"limit":100, **({"after":after} if after else {})})
-            files.extend(page.get("data", []))
-            if not page.get("has_more"):
-                break
-            if not page.get("last_id") or len(files) > 500:
-                raise MorningInputError("Storageのシフト一覧を最後まで確認できなかったよ")
-            after = page["last_id"]
+        files = {}
+        for store in stores:
+            after, total = None, 0
+            while True:
+                page = _openai(c, f"/vector_stores/{store}/files", params={"limit":100, **({"after":after} if after else {})})
+                for item in page.get('data',[]):
+                    if item.get('status') != 'completed':
+                        raise MorningInputError('Storageで処理中・失敗中の資料があるよ。完了を確認してね')
+                    files.setdefault(item['id'],store)
+                total += len(page.get('data',[]))
+                if not page.get('has_more'):
+                    break
+                if not page.get('last_id') or total > 500:
+                    raise MorningInputError('Storageのシフト一覧を最後まで確認できなかったよ')
+                after = page['last_id']
         matches = []
-        for item in files:
-            if item.get("status") != "completed":
-                raise MorningInputError("Storageで処理中・失敗中の資料があるよ。完了を確認してね")
-            meta = _openai(c, f"/files/{item['id']}")
+        for file_id,store in files.items():
+            meta = _openai(c, f"/files/{file_id}")
             filename = unicodedata.normalize("NFKC", meta.get("filename", ""))
             match = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日から(\d{1,2})日まで\.pdf", filename)
             if not match:
@@ -211,11 +228,13 @@ def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str 
             y, m, a, b = map(int, match.groups())
             explicitly_confirmed = extra_date == day.isoformat() and (y, m) == (day.year, day.month)
             if date(y,m,a) <= day <= date(y,m,b) or explicitly_confirmed:
-                matches.append((item['id'], filename))
-        if len(matches) != 1:
-            raise MorningInputError("今日を含む確定シフトPDFがないか、対象期間が重複しているよ")
-        file_id, filename = matches[0]
-        page = _openai(c, f"/vector_stores/{vector_store}/files/{file_id}/content")
+                matches.append((store,file_id,filename))
+        if not matches:
+            raise MorningInputError('対象日を含む確定シフトPDFが登録済みの保存先にないよ。別のVector storeに置いた場合はシフトの追加保存先を設定してね')
+        if len(matches) > 1:
+            raise MorningInputError('対象日を含む確定シフトPDFの期間が重複しているよ。正しい資料を1つに絞ってね')
+        store,file_id,filename = matches[0]
+        page = _openai(c, f"/vector_stores/{store}/files/{file_id}/content")
         if page.get("has_more"):
             raise MorningInputError("シフトPDFの内容が複数ページに分かれているよ。確認が必要だよ")
         text = "\n".join(row.get("text", "") for row in page.get("data", []))
@@ -523,7 +542,7 @@ def collect(day: date, env=None) -> dict:
     if missing:
         raise MorningInputError("メール接続設定が未入力だよ: " + " / ".join(missing))
     with ThreadPoolExecutor(max_workers=3) as pool:
-        shift_future = pool.submit(load_attendance, day, env.get("OPENAI_API_KEY", ""), env.get("OPENAI_VECTOR_STORE_ID", ""), env.get("MORNING_SHIFT_EXTRA_DATE", ""), env.get("MORNING_ATTENDANCE_OVERRIDES", "{}"))
+        shift_future = pool.submit(load_attendance, day, env.get("OPENAI_API_KEY", ""), env.get("OPENAI_VECTOR_STORE_ID", ""), env.get("MORNING_SHIFT_EXTRA_DATE", ""), env.get("MORNING_ATTENDANCE_OVERRIDES", "{}"), env.get("MORNING_SHIFT_VECTOR_STORE_IDS", "[]"))
         gmail_future = pool.submit(count_mailbox, "gmail", day, env, include_keys=True)
         yahoo_future = pool.submit(count_mailbox, "yahoo", day, env, include_keys=True)
         shifts = shift_future.result()
