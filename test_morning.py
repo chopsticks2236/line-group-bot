@@ -407,6 +407,14 @@ class MailTests(unittest.TestCase):
 
 
 class DigestTests(unittest.TestCase):
+    def test_one_time_notice_follows_first_unsent_span_not_calendar_expiry(self):
+        env={'MORNING_ONE_TIME_NOTICE':json.dumps({'from_date':'2026-11-05','text':'一度だけのお知らせ'})}
+        counts=dict.fromkeys(PLATFORMS,0)
+        self.assertNotIn('一度だけ',build_digest(date(2026,11,4),[],counts,env=env))
+        self.assertIn('一度だけ',build_digest(date(2026,11,5),[],counts,first_day=date(2026,11,4),env=env))
+        self.assertIn('一度だけ',build_digest(date(2026,11,7),[],counts,first_day=date(2026,11,4),env=env))
+        self.assertNotIn('一度だけ',build_digest(date(2026,11,8),[],counts,first_day=date(2026,11,8),env=env))
+
     def test_requested_tone_and_all_four_platforms(self):
         shifts=[{'name':'上元さん','start':'09:00','end':'13:00'},{'name':'小山さん','start':'09:00','end':'13:00'}]
         result=build_digest(date(2026,11,5),shifts,dict(zip(PLATFORMS,[3,0,0,4])))
