@@ -10,12 +10,11 @@ from bot.morning import (JST, MorningInputError, PLATFORMS, build_digest,
                          collect, count_mailbox, mail_window,
                          morning_retry_key, parse_schedule, run_morning,
                          sale_candidate, transaction_id, seller_payment_confirmed,
-                         merge_mail_results, unhandled_sale_notice, attendance_override, load_attendance)
+                         merge_mail_results, unhandled_sale_notice, attendance_override, load_attendance, schedule_stores)
 
 
-def schedule_fixture():
+def schedule_fixture(year=2026,month=11):
     """Synthetic layout, no real employee attendance or private data."""
-    year, month = 2026, 11
     days = calendar.monthrange(year, month)[1]
     centers = [20 + i*8 for i in range(days)]
     def row(values, label="", total=""):
@@ -25,7 +24,7 @@ def schedule_fixture():
             p = centers[day-1]-len(value)//2
             chars[p:p+len(value)] = value
         return "".join(chars).rstrip()+"  "+total
-    lines = ["2026年11月 テスト シフト表",
+    lines = [f"{year}年{month}月 テスト シフト表",
              row({n:str(n) for n in range(1,days+1)}),
              row({n:"("+"月火水木金土日"[date(year,month,n).weekday()]+")" for n in range(1,days+1)})]
     for person, active in [("上元",True),("小山",True),("比嘉",False),("与久田",False)]:
@@ -92,6 +91,67 @@ class ScheduleTests(unittest.TestCase):
     def test_missing_employee_rejected(self):
         with self.assertRaises(MorningInputError):
             parse_schedule(schedule_fixture().replace('小山','別人'), "2026年11月1日から20日まで.pdf")
+
+
+class ShiftStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.paths=[]
+        self.files={'vs_primary':['file-next'],'vs_shift':['file-current']}
+        self.names={'file-current':'2026年11月1日から20日まで.pdf',
+                    'file-next':'2026年12月1日から20日まで.pdf'}
+        self.pending=set()
+
+    def reply(self,client,path,**kwargs):
+        self.paths.append(path)
+        if path.startswith('/files/'):
+            return {'filename':self.names[path.split('/')[-1]]}
+        parts=path.split('/')
+        store=parts[2]
+        if path.endswith('/content'):
+            month=12 if parts[-2]=='file-next' else 11
+            return {'data':[{'text':schedule_fixture(month=month)}],'has_more':False}
+        return {'data':[{'id':fid,'status':'in_progress' if fid in self.pending else 'completed'}
+                        for fid in self.files[store]],'has_more':False}
+
+    def load(self,day=date(2026,11,5),additional='["vs_shift"]'):
+        with patch('bot.morning.httpx.Client'),patch('bot.morning._openai',side_effect=self.reply):
+            return load_attendance(day,'test-key','vs_primary',additional_stores=additional)
+
+    def test_moved_current_shift_is_read_from_the_correct_secondary_store(self):
+        self.assertEqual(len(self.load()),2)
+        self.assertIn('/vector_stores/vs_shift/files/file-current/content',self.paths)
+        self.assertNotIn('/vector_stores/vs_primary/files/file-current/content',self.paths)
+
+    def test_next_month_in_primary_store_is_not_lost(self):
+        self.assertEqual(len(self.load(date(2026,12,5))),2)
+        self.assertIn('/vector_stores/vs_primary/files/file-next/content',self.paths)
+
+    def test_same_file_in_both_stores_is_not_a_false_overlap(self):
+        self.files['vs_primary'].append('file-current')
+        self.assertEqual(len(self.load()),2)
+        self.assertEqual(self.paths.count('/files/file-current'),1)
+
+    def test_different_overlapping_files_fail_instead_of_guessing_latest(self):
+        self.files['vs_primary'].append('file-other')
+        self.names['file-other']='2026年11月1日から20日まで.pdf'
+        with self.assertRaisesRegex(MorningInputError,'重複'):self.load()
+
+    def test_missing_shift_error_names_the_source_configuration_problem(self):
+        with self.assertRaisesRegex(MorningInputError,'追加保存先'):self.load(additional='[]')
+        self.assertFalse(any('vs_shift' in p for p in self.paths))
+
+    def test_incomplete_or_unreachable_source_is_not_treated_as_a_holiday(self):
+        self.pending.add('file-current')
+        with self.assertRaisesRegex(MorningInputError,'処理中'):self.load()
+        with patch('bot.morning.httpx.Client'),patch('bot.morning._openai',side_effect=MorningInputError('接続失敗')):
+            with self.assertRaises(MorningInputError):
+                load_attendance(date(2026,11,5),'test','vs_primary',additional_stores='["vs_shift"]')
+
+    def test_only_valid_explicit_stores_are_allowed_and_primary_is_preserved(self):
+        self.assertEqual(schedule_stores('vs_primary','["vs_shift","vs_primary","vs_shift"]'),['vs_primary','vs_shift'])
+        self.assertEqual(schedule_stores('vs_primary'),['vs_primary'])
+        for raw in ['{}','null','["vs_bad/path"]','[null]','not-json']:
+            with self.subTest(raw=raw),self.assertRaises(MorningInputError):schedule_stores('vs_primary',raw)
 
 
 class MailTests(unittest.TestCase):
