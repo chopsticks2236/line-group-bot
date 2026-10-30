@@ -190,7 +190,7 @@ def prepare(day, state, env):
     previous = date.fromisoformat(state['collected_through'])
     if previous > day or (day-previous).days > 31:
         raise MorningInputError("未集計期間が31日を超えるか、集計済み日より前の日付だよ。確認が必要だよ")
-    shifts = load_attendance(day,env.get('OPENAI_API_KEY',''),env.get('OPENAI_VECTOR_STORE_ID',''),env.get('MORNING_SHIFT_EXTRA_DATE',''),env.get('MORNING_ATTENDANCE_OVERRIDES','{}'))
+    shifts = load_attendance(day,env.get('OPENAI_API_KEY',''),env.get('OPENAI_VECTOR_STORE_ID',''),env.get('MORNING_SHIFT_EXTRA_DATE',''),env.get('MORNING_ATTENDANCE_OVERRIDES','{}'),env.get('MORNING_SHIFT_VECTOR_STORE_IDS','[]'))
     # Refresh only unnotified cached days after classifier/source changes.
     # Sent receipts and uncertain outboxes retain their existing safety guards.
     for key,row in list(state['days'].items()):
