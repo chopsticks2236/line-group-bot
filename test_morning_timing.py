@@ -1,6 +1,9 @@
 import copy
+import io
+import json
 import os
 import unittest
+import urllib.error
 from datetime import date, datetime, timedelta
 from email.message import EmailMessage
 from unittest.mock import patch
@@ -108,6 +111,26 @@ class TimingTests(unittest.TestCase):
             morning_trigger.main()
         self.assertTrue(all(c.args[0]==0 for c in sleep.call_args_list))
         self.assertEqual([c.args[0] for c in call.call_args_list],['/','/cron/morning'])
+
+    def test_runner_reports_safe_input_error_without_dumping_private_payload(self):
+        now=datetime(2026,11,5,8,tzinfo=JST)
+        class Clock:
+            @classmethod
+            def now(cls,tz):return now
+        def fail(path,*args):
+            if path=='/':return {'ok':True}
+            body=json.dumps({'status':'input_error','error':'対象日のシフトがないよ',
+                             'counts':{'private':123},'text':'private employee schedule'}).encode()
+            raise urllib.error.HTTPError('https://example.invalid/cron/morning',502,'error',{},io.BytesIO(body))
+        with patch.dict(os.environ,{**TIMING,'CRON_SECRET':'test-only'},clear=True),\
+             patch.object(morning_trigger,'datetime',Clock),patch.object(morning_trigger.time,'sleep'),\
+             patch.object(morning_trigger,'call',side_effect=fail),patch('builtins.print') as output:
+            with self.assertRaises(SystemExit):morning_trigger.main()
+        messages=' '.join(str(c.args) for c in output.call_args_list)
+        self.assertIn('対象日のシフトがないよ',messages)
+        self.assertNotIn('private employee schedule',messages)
+        self.assertNotIn('test-only',messages)
+        self.assertNotIn('counts',messages)
 
 
 class LedgerCutoverTests(unittest.TestCase):
