@@ -527,17 +527,11 @@ def build_digest(day: date, shifts: list[dict], counts: dict, *, first_day=None,
     lines = ["おはようございます😊", ""] + lines
     lines += ["", "発送件数は"] + [f"{p}{counts[p]}件" for p in PLATFORMS] + ["だよ✨"]
     try:
-        notice = json.loads(env.get('MORNING_ONE_TIME_NOTICE','{}'))
-        assert isinstance(notice,dict)
+        from bot.notice_media import active_notice
+        notice = active_notice(day,first_day,env)
         if notice:
-            assert set(notice) == {'from_date','text'}
-            anchor = date.fromisoformat(notice['from_date'])
-            assert isinstance(notice['text'],str) and 0 < len(notice['text'].strip()) <= 1000
-            # The durable sent-through receipt advances first_day after delivery.
-            # Holidays, failed sends and dry runs do not consume this notice.
-            if (first_day or day) <= anchor <= day:
-                lines += ['',notice['text'].strip()]
-    except (AssertionError,ValueError,TypeError,KeyError) as exc:
+            lines += ['',notice['text'].strip()]
+    except (AssertionError,ValueError,TypeError,KeyError,OSError) as exc:
         raise MorningInputError('次回限定のお知らせ設定が不正だよ') from exc
     rare_sales = [platform for platform in ("ラクマ", "Yahoo!フリマ") if counts[platform] > 0]
     if rare_sales:
