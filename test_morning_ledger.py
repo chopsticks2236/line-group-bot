@@ -88,8 +88,10 @@ class LedgerTests(unittest.TestCase):
         self.push.assert_not_called()
         self.assertEqual(self.state()['days']['2026-11-05']['counts']['ヤフオク'],1)
         self.mocks[4].reset_mock()
+        rows=len(self.items.rows)
         self.run_day('2026-11-05')
         self.mocks[4].assert_not_called()
+        self.assertEqual(len(self.items.rows),rows)
 
     def test_two_holidays_restart_and_next_workday_union_without_duplicates(self):
         self.mail.update({'2026-11-05':{'ヤフオク':['a']},
