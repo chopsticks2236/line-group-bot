@@ -243,11 +243,8 @@ def run_workday_morning(day, *, dry_run=False, env=None):
             state['collected_through'] = day.isoformat()
             state['days'] = {key:row for key,row in state['days'].items() if key <= day.isoformat()}
         check_window_policy(state,env)
-        cached = state['days'].get(day.isoformat())
-        if (not dry_run and cached and cached.get('workday') is False
-                and cached.get('rules_version') == MAIL_RULESET_VERSION
-                and attendance_override(day,env.get('MORNING_ATTENDANCE_OVERRIDES','{}')) is None):
-            return {'ok':True,'status':'holiday_accumulated','date':day.isoformat(),'notification_sent':False}
+        # Always re-read the current schedule, even after a cached holiday.
+        # Mail counts and successful send receipts remain unchanged.
         updated,result = prepare(day,state,env)
         if dry_run:
             # Test writes are isolated probe records, never production counts or receipts.
