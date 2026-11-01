@@ -257,7 +257,8 @@ def run_workday_morning(day, *, dry_run=False, env=None):
                     raise MorningInputError("LINEのメッセージ形式検証に失敗したよ")
             return {'ok':True,'status':'dry_run_validated',**result}
         if not result['would_send']:
-            store.save(updated)
+            if updated != state:
+                store.save(updated)
             return {'ok':True,'status':'holiday_accumulated','date':day.isoformat(),'notification_sent':False}
         pending = updated.get('outbox')
         if pending and (pending['date'] != day.isoformat() or pending['digest_hash'] != result['digest_hash']):
