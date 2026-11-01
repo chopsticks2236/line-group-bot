@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -151,15 +152,26 @@ def search_vector_store(client: Any, question: str) -> tuple[str, bool]:
         return "（Vector Store未設定）", False
 
     try:
-        results = client.vector_stores.search(
-            vector_store_id=config.OPENAI_VECTOR_STORE_ID,
-            query=question,
-            max_num_results=5,
-            rewrite_query=True,
-        )
+        import httpx
+        from bot.morning import schedule_stores
+        from bot.source_library import refresh_sources
+        stores = schedule_stores(config.OPENAI_VECTOR_STORE_ID, os.getenv('MORNING_SHIFT_VECTOR_STORE_IDS','[]'))
+        with httpx.Client(base_url='https://api.openai.com/v1',
+                          headers={'Authorization':f'Bearer {config.OPENAI_API_KEY}'},timeout=8) as http:
+            sources = refresh_sources(http, stores)
+        if any(not item['ready'] for item in sources):
+            return '（最新資料は処理中。古い資料で断定せず、ご主人様（km）に確認してね）', False
+        allowed = {item['id'] for item in sources}
+        rows = []
+        for store in dict.fromkeys(item['store'] for item in sources):
+            results = client.vector_stores.search(vector_store_id=store, query=question,
+                                                 max_num_results=50, rewrite_query=True)
+            rows.extend(result for result in (getattr(results,'data',[]) or [])
+                        if getattr(result,'file_id',None) in allowed)
+        rows.sort(key=lambda result: getattr(result,'score',0), reverse=True)
 
         snippets: list[str] = []
-        for result in getattr(results, "data", []) or []:
+        for result in rows[:5]:
             filename = getattr(result, "filename", None) or "アップロード資料"
             texts: list[str] = []
             for content in getattr(result, "content", []) or []:
@@ -179,9 +191,9 @@ def search_vector_store(client: Any, question: str) -> tuple[str, bool]:
             return "（今回の質問に関連する検索結果なし）", True
         return "\n\n".join(snippets), True
     except Exception:
-        # 検索APIが一時的に失敗した場合は、下流のfile_searchツールへフォールバックする。
-        log.exception("Vector Store search failed; falling back to file_search tool")
-        return "（Vector Store検索APIが一時的に利用できません）", False
+        # Never bypass latest-version filtering with an unrestricted file_search.
+        log.warning('Latest document refresh/search unavailable')
+        return "（最新資料を確認できないため、社内情報は断定せずご主人様（km）に確認してね）", False
 
 
 def generate_reply(
@@ -227,13 +239,7 @@ def generate_reply(
     try:
         tools: list[dict[str, Any]] = []
         if config.OPENAI_VECTOR_STORE_ID and not vector_search_ok:
-            tools.append(
-                {
-                    "type": "file_search",
-                    "vector_store_ids": [config.OPENAI_VECTOR_STORE_ID],
-                    "max_num_results": 5,
-                }
-            )
+            system_prompt += '\n最新アップロード資料を確認できていません。会話ログだけで古い社内シフト・運用を断定せず、ご主人様（km）に確認すると伝えてください。'
 
         request_args: dict[str, Any] = {
             "model": config.OPENAI_MODEL,
