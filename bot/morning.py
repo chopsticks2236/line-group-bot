@@ -73,7 +73,12 @@ def parse_schedule(text: str, filename: str, *, extra_day: date | None = None) -
     time to the next date. The filename bounds the confirmed date range, even
     when the PDF contains other dates with blank/unconfirmed cells.
     """
-    filename = unicodedata.normalize("NFKC", filename)
+    from bot.source_library import schedule_period, canonical_schedule_name, LibraryError
+    try:
+        period = schedule_period(filename)
+        filename = canonical_schedule_name(period) if period else normalized_filename(filename)
+    except (ValueError, LibraryError) as exc:
+        raise MorningInputError('シフトPDFの対象期間を確認してね') from exc
     bounds = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日から(\d{1,2})日まで\.pdf", filename)
     if not bounds:
         raise MorningInputError("シフトPDF名は「2026年10月21日から31日まで.pdf」の形式にしてね")
@@ -159,6 +164,10 @@ def _openai(client: httpx.Client, path: str, **kwargs):
         raise MorningInputError("OpenAI Storageのシフト取得に失敗したよ") from exc
 
 
+def normalized_filename(filename):
+    return unicodedata.normalize('NFKC', filename)
+
+
 def attendance_override(day: date, raw: str = "{}") -> list[dict] | None:
     """Private admin-only, date-scoped exceptions; never modify the source PDF."""
     try:
@@ -203,37 +212,28 @@ def load_attendance(day: date, api_key: str, vector_store: str, extra_date: str 
         raise MorningInputError("OpenAI Storageへの接続設定が未入力だよ")
     stores = schedule_stores(vector_store,additional_stores)
     with httpx.Client(base_url="https://api.openai.com/v1", headers={"Authorization": f"Bearer {api_key}"}, timeout=20) as c:
-        files = {}
-        for store in stores:
-            after, total = None, 0
-            while True:
-                page = _openai(c, f"/vector_stores/{store}/files", params={"limit":100, **({"after":after} if after else {})})
-                for item in page.get('data',[]):
-                    if item.get('status') != 'completed':
-                        raise MorningInputError('Storageで処理中・失敗中の資料があるよ。完了を確認してね')
-                    files.setdefault(item['id'],store)
-                total += len(page.get('data',[]))
-                if not page.get('has_more'):
-                    break
-                if not page.get('last_id') or total > 500:
-                    raise MorningInputError('Storageのシフト一覧を最後まで確認できなかったよ')
-                after = page['last_id']
+        from bot.source_library import refresh_sources, LibraryError
+        try:
+            files = refresh_sources(c, stores)
+        except (LibraryError, ValueError) as exc:
+            raise MorningInputError(str(exc) if isinstance(exc,LibraryError) else 'シフトPDFの対象日付が不正だよ') from exc
         matches = []
-        for file_id,store in files.items():
-            meta = _openai(c, f"/files/{file_id}")
-            filename = unicodedata.normalize("NFKC", meta.get("filename", ""))
-            match = re.fullmatch(r"(\d{4})年(\d{1,2})月(\d{1,2})日から(\d{1,2})日まで\.pdf", filename)
-            if not match:
+        for item in files:
+            period = item['period']
+            if not period:
                 continue
-            y, m, a, b = map(int, match.groups())
-            explicitly_confirmed = extra_date == day.isoformat() and (y, m) == (day.year, day.month)
-            if date(y,m,a) <= day <= date(y,m,b) or explicitly_confirmed:
-                matches.append((store,file_id,filename))
+            start, end = period
+            explicitly_confirmed = extra_date == day.isoformat() and (start.year,start.month) == (day.year,day.month)
+            if start <= day <= end or explicitly_confirmed:
+                matches.append(item)
         if not matches:
             raise MorningInputError('対象日を含む確定シフトPDFが登録済みの保存先にないよ。別のVector storeに置いた場合はシフトの追加保存先を設定してね')
         if len(matches) > 1:
             raise MorningInputError('対象日を含む確定シフトPDFの期間が重複しているよ。正しい資料を1つに絞ってね')
-        store,file_id,filename = matches[0]
+        item = matches[0]
+        if not item['ready']:
+            raise MorningInputError('最新シフトPDFがStorageで処理中・失敗中だよ。古い版では送らず、完了後に再確認するね')
+        store,file_id,filename = item['store'],item['id'],item['filename']
         page = _openai(c, f"/vector_stores/{store}/files/{file_id}/content")
         if page.get("has_more"):
             raise MorningInputError("シフトPDFの内容が複数ページに分かれているよ。確認が必要だよ")
