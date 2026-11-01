@@ -253,5 +253,12 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.run_day('2026-11-06')['status'],'holiday_accumulated')
         self.assertEqual(self.push.call_count,1)
 
+    def test_updated_pdf_can_change_cached_holiday_to_workday(self):
+        self.assertEqual(self.run_day('2026-11-05')['status'],'holiday_accumulated')
+        self.work('2026-11-05')
+        self.assertEqual(self.run_day('2026-11-05')['status'],'sent')
+        self.assertEqual(self.run_day('2026-11-05')['status'],'already_sent')
+        self.assertEqual(self.push.call_count,1)
+
 
 if __name__=='__main__':unittest.main()
