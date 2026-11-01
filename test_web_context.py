@@ -86,7 +86,7 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("tools", args)  # Final answer cannot send private context to a search tool.
         self.assertIn("https://example.com/info", answer)
 
-    def test_file_search_fallback_preserved_but_web_is_isolated(self):
+    def test_failed_refresh_does_not_bypass_revision_filter_but_web_is_isolated(self):
         from bot import ai_reply
         client = MagicMock()
         client.with_options.return_value = client
@@ -94,7 +94,8 @@ class WebTests(unittest.TestCase):
         with patch("openai.OpenAI", return_value=client), patch.object(ai_reply.config, "OPENAI_API_KEY", "test-key"), patch.object(ai_reply.config, "OPENAI_VECTOR_STORE_ID", "vs_test"), patch.object(ai_reply.config, "OPENAI_WEB_SEARCH_ENABLED", False), patch.object(ai_reply, "get_setting", return_value=None), patch.object(ai_reply, "search_vector_store", return_value=("未検索", False)), patch.object(ai_reply, "get_web_context") as search:
             ai_reply.generate_reply("質問", [], "口調設定")
         args = client.responses.create.call_args.kwargs
-        self.assertEqual([tool["type"] for tool in args["tools"]], ["file_search"])
+        self.assertNotIn('tools',args)
+        self.assertIn('最新アップロード資料を確認できていません',args['instructions'])
         search.assert_not_called()
 
 
