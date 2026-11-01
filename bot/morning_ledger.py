@@ -205,13 +205,16 @@ def prepare(day, state, env):
     state['days'][day.isoformat()]['workday'] = bool(shifts)
     totals, first = aggregate(state,day)
     text = build_digest(day,shifts,totals,first_day=first,window_mode=state['window_mode'],env=env)
+    from bot.notice_media import digest_messages
+    messages = digest_messages(text,day,first,env)
     first_start,_ = mail_window(first,mode=state['window_mode'],env=env)
     _,last_end = mail_window(day,mode=state['window_mode'],env=env)
     return state, {'date':day.isoformat(),'attendance':shifts,'counts':totals,'text':text,
                    'first_day':first.isoformat(),'would_send':bool(shifts),
                    'window_start':first_start.isoformat(),'window_end':last_end.isoformat(),
                    'send_time':notification_time(env).strftime('%H:%M'),
-                   'digest_hash':hashlib.sha256(text.encode()).hexdigest()}
+                   'messages':messages,'image_attached':len(messages)>1,
+                   'digest_hash':hashlib.sha256((json.dumps(messages,ensure_ascii=False,sort_keys=True) if len(messages)>1 else text).encode()).hexdigest()}
 
 
 def run_workday_morning(day, *, dry_run=False, env=None):
@@ -252,7 +255,7 @@ def run_workday_morning(day, *, dry_run=False, env=None):
             with httpx.Client(timeout=15) as client:
                 response = client.post('https://api.line.me/v2/bot/message/validate/push',
                     headers={'Authorization':f'Bearer {config.LINE_CHANNEL_ACCESS_TOKEN}'},
-                    json={'messages':[{'type':'text','text':result['text']}]})
+                    json={'messages':result['messages']})
                 if response.status_code != 200:
                     raise MorningInputError("LINEのメッセージ形式検証に失敗したよ")
             return {'ok':True,'status':'dry_run_validated',**result}
@@ -266,7 +269,8 @@ def run_workday_morning(day, *, dry_run=False, env=None):
             raise MorningInputError("以前の通知の送信結果か本文の変更を確認する必要があるため、二重送信を防いで停止したよ")
         updated['outbox'] = {'date':day.isoformat(),'digest_hash':result['digest_hash']}
         store.save(updated)  # A durable outbox must exist BEFORE LINE can accept anything.
-        status = push_text(config.LINE_GROUP_ID,result['text'],retry_key=morning_retry_key(config.LINE_GROUP_ID,day))
+        image_args = {'image_url':result['messages'][1]['originalContentUrl']} if result['image_attached'] else {}
+        status = push_text(config.LINE_GROUP_ID,result['text'],retry_key=morning_retry_key(config.LINE_GROUP_ID,day),**image_args)
         updated['sent_through'] = day.isoformat()
         updated['outbox'] = None
         # Keep 90 days of notified hashes to suppress repeated sale notifications.
