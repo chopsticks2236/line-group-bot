@@ -13,7 +13,7 @@ import sys
 from datetime import date, datetime
 from threading import Event, Lock, Thread
 
-from flask import Flask, abort, jsonify, request
+from flask import Flask, abort, jsonify, request, Response
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.messaging import Configuration
@@ -36,6 +36,16 @@ log = logging.getLogger("app")
 
 app = Flask(__name__)
 init_db()
+
+
+@app.get('/notice-media/<token>.jpg')
+def notice_image(token):
+    from bot.notice_media import served_image
+    try:
+        data = served_image(token)
+    except Exception:
+        abort(404)
+    return Response(data,mimetype='image/jpeg',headers={'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer'})
 
 _schedule_lock = Lock()
 _scheduler_stop = Event()
