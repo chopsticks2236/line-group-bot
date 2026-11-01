@@ -91,6 +91,19 @@ LINE送信、保存記録の更新、送信済み範囲の変更はしない。�
 
 ## 確定シフト
 
+### 次回限定の文章・画像
+
+Renderの非公開Secret File `morning_notice.json` に `from_date` / `text` と任意の `image` を保存できる。
+画像の項目は `token`（ランダムな64桁hex）、タイムゾーン付き `expires_at`、`sha256`、JPEGのbase64 `data`。
+画像データや実際の注意文・URLトークンは公開リポジトリへコミットしない。
+既定の読み取り先は `/etc/secrets/morning_notice.json`。画像なしの既存環境変数設定も互換対応。
+未通知範囲がfrom_dateを含む次の出勤日にだけ、通常本文へ注意文と画像を追加する。
+文章・画像は同じLINE push requestとretry keyで送信し、送信済み範囲が進むと次回以降は除外する。
+休日・非送信診断・送信失敗はお知らせを消費しない。送信前の本文ハッシュには画像URLも含める。
+`/notice-media/<token>.jpg` は承認済みの限定公開画像URL。正しいトークンと期限内の場合のみJPEGを返す。
+HTTPヘッダーはno-storeとnosniff。期限切れ・不正トークン・画像破損は404。LINEの画像URL取得は配信後にも起こり得るため、送信受付直後にはURLを無効化しない。
+期限切れまで未配信なら、部分的に文章だけを送らず停止するので管理者が期限を更新する。
+
 シフトを別のVector storeへ置いた場合、非公開の `MORNING_SHIFT_VECTOR_STORE_IDS` に追加の
 Vector store IDをJSON配列で指定する。既存の `OPENAI_VECTOR_STORE_ID` も引き続き読むため、
 会話ログの保存先や、別の月のPDFを変更・複製する必要はない。未指定の保存先は検索しない。
