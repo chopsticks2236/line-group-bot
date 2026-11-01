@@ -100,9 +100,14 @@ class ShiftStoreTests(unittest.TestCase):
         self.names={'file-current':'2026年11月1日から20日まで.pdf',
                     'file-next':'2026年12月1日から20日まで.pdf'}
         self.pending=set()
+        self.created={}
 
     def reply(self,client,path,**kwargs):
+        path=path.split('?')[0]
         self.paths.append(path)
+        if path=='/files':
+            return {'data':[{'id':fid,'filename':name,'created_at':self.created.get(fid,100)}
+                            for fid,name in self.names.items()],'has_more':False}
         if path.startswith('/files/'):
             return {'filename':self.names[path.split('/')[-1]]}
         parts=path.split('/')
@@ -114,7 +119,7 @@ class ShiftStoreTests(unittest.TestCase):
                         for fid in self.files[store]],'has_more':False}
 
     def load(self,day=date(2026,11,5),additional='["vs_shift"]'):
-        with patch('bot.morning.httpx.Client'),patch('bot.morning._openai',side_effect=self.reply):
+        with patch('bot.morning.httpx.Client'),patch('bot.morning._openai',side_effect=self.reply),patch('bot.source_library.request',side_effect=self.reply):
             return load_attendance(day,'test-key','vs_primary',additional_stores=additional)
 
     def test_moved_current_shift_is_read_from_the_correct_secondary_store(self):
@@ -129,14 +134,36 @@ class ShiftStoreTests(unittest.TestCase):
     def test_same_file_in_both_stores_is_not_a_false_overlap(self):
         self.files['vs_primary'].append('file-current')
         self.assertEqual(len(self.load()),2)
-        self.assertEqual(self.paths.count('/files/file-current'),1)
+        self.assertEqual(self.paths.count('/files'),1)
 
     def test_different_overlapping_files_fail_instead_of_guessing_latest(self):
         self.files['vs_primary'].append('file-other')
         self.names['file-other']='2026年11月1日から20日まで.pdf'
         with self.assertRaisesRegex(MorningInputError,'重複'):self.load()
 
+    def test_newer_same_period_is_selected_and_revision_suffix_is_supported(self):
+        self.files['vs_primary'].append('file-new')
+        self.names['file-new']='シフト_2026年11月1日～20日_修正版.pdf'
+        self.created['file-new']=200
+        self.assertEqual(len(self.load()),2)
+        self.assertIn('/vector_stores/vs_primary/files/file-new/content',self.paths)
+        self.assertNotIn('/vector_stores/vs_shift/files/file-current/content',self.paths)
+
+    def test_in_progress_new_revision_never_falls_back_to_old_pdf(self):
+        self.files['vs_primary'].append('file-new')
+        self.names['file-new']='2026年11月1日から20日まで.pdf'
+        self.created['file-new']=200
+        self.pending.add('file-new')
+        with self.assertRaisesRegex(MorningInputError,'最新シフトPDF'):self.load()
+
+    def test_unrelated_pending_text_does_not_block_attendance(self):
+        self.files['vs_primary'].append('file-note')
+        self.names['file-note']='テスト.txt'
+        self.pending.add('file-note')
+        self.assertEqual(len(self.load()),2)
+
     def test_missing_shift_error_names_the_source_configuration_problem(self):
+        del self.names['file-current']
         with self.assertRaisesRegex(MorningInputError,'追加保存先'):self.load(additional='[]')
         self.assertFalse(any('vs_shift' in p for p in self.paths))
 
