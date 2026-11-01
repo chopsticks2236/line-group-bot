@@ -12,6 +12,7 @@ from linebot.v3.messaging import (
     PushMessageRequest,
     ReplyMessageRequest,
     TextMessage,
+    ImageMessage,
 )
 from linebot.v3.messaging.exceptions import ApiException
 
@@ -39,7 +40,7 @@ def reply_text(reply_token: str, text: str) -> None:
         )
 
 
-def push_text(to: str, text: str, *, retry_key: str | None = None) -> str:
+def push_text(to: str, text: str, *, retry_key: str | None = None, image_url: str | None = None) -> str:
     """プッシュ送信する。LINE側で同じ再送キーが受付済みなら成功扱いにする。"""
     if not config.LINE_CHANNEL_ACCESS_TOKEN:
         raise RuntimeError("LINE_CHANNEL_ACCESS_TOKEN が未設定です")
@@ -49,7 +50,7 @@ def push_text(to: str, text: str, *, retry_key: str | None = None) -> str:
             api.push_message(
                 PushMessageRequest(
                     to=to,
-                    messages=[TextMessage(text=text[:5000])],
+                    messages=[TextMessage(text=text[:5000])]+([ImageMessage(original_content_url=image_url,preview_image_url=image_url)] if image_url else []),
                 ),
                 x_line_retry_key=retry_key,
             )
