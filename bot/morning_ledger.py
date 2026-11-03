@@ -20,7 +20,7 @@ from openai import OpenAI
 
 from bot.morning import (JST, MAIL_RULESET_VERSION, MorningInputError, PLATFORMS, build_digest,
                          attendance_override, count_mailbox, load_attendance, mail_window, merge_mail_results, morning_retry_key)
-from bot.morning_timing import notification_time, window_policy
+from bot.morning_timing import notification_time, window_policy, mail_window_overrides
 
 KIND = "kameko_morning_ledger_v1"
 PROBE_KIND = "kameko_morning_probe_v1"
@@ -147,18 +147,19 @@ def read_day(day, env):
     return row
 
 
-def aggregate(state, day):
+def aggregate(state, day, *, report_from=None):
     totals = dict.fromkeys(PLATFORMS,0)
     seen = {p:set() for p in PLATFORMS}
     pending = []
     for key,row in sorted(state['days'].items()):
         if key > day.isoformat():
             continue
-        if key > state['sent_through']:
+        included = key > state['sent_through'] and (report_from is None or key >= report_from.isoformat())
+        if included:
             pending.append(key)
         for p in PLATFORMS:
             keys = set(row['keys'][p])
-            if key > state['sent_through']:
+            if included:
                 if p in row['manual']:
                     totals[p] += max(0,row['manual'][p]-len(keys & seen[p]))
                 else:
@@ -203,14 +204,27 @@ def prepare(day, state, env):
         state['collected_through'] = cursor.isoformat()
         cursor += timedelta(days=1)
     state['days'][day.isoformat()]['workday'] = bool(shifts)
-    totals, first = aggregate(state,day)
+    notice_first = min(date.fromisoformat(key) for key in state['days']
+                       if state['sent_through'] < key <= day.isoformat())
+    exact_window = day.isoformat() in mail_window_overrides(env)
+    totals, first = aggregate(state,day,report_from=day if exact_window else None)
+    excluded = 0
+    if exact_window:
+        for key,row in state['days'].items():
+            if state['sent_through'] < key < day.isoformat():
+                row['excluded_from_report_on'] = day.isoformat()
+                excluded += 1
     text = build_digest(day,shifts,totals,first_day=first,window_mode=state['window_mode'],env=env)
-    from bot.notice_media import digest_messages
-    messages = digest_messages(text,day,first,env)
+    from bot.notice_media import digest_messages, active_notice
+    carried_notice = active_notice(day,notice_first,env)
+    if carried_notice and not active_notice(day,first,env):
+        text += '\n\n' + carried_notice['text'].strip()
+    messages = digest_messages(text,day,notice_first,env)
     first_start,_ = mail_window(first,mode=state['window_mode'],env=env)
     _,last_end = mail_window(day,mode=state['window_mode'],env=env)
     return state, {'date':day.isoformat(),'attendance':shifts,'counts':totals,'text':text,
                    'first_day':first.isoformat(),'would_send':bool(shifts),
+                   'excluded_earlier_pending_days':excluded,
                    'window_start':first_start.isoformat(),'window_end':last_end.isoformat(),
                    'send_time':notification_time(env).strftime('%H:%M'),
                    'messages':messages,'image_attached':len(messages)>1,
