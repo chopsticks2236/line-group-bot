@@ -23,6 +23,34 @@ TIMING = {
 
 
 class TimingTests(unittest.TestCase):
+    def test_one_day_override_and_next_day_bridge(self):
+        env={**TIMING,'MORNING_MAIL_WINDOW_OVERRIDES':json.dumps({'2026-11-04':{'start':'14:00','end':'06:30'}})}
+        a,b=mail_window(date(2026,11,4),env=env)
+        self.assertEqual(a,datetime(2026,11,3,14,0,tzinfo=JST))
+        self.assertEqual(b,datetime(2026,11,4,6,30,tzinfo=JST))
+        after=mail_window(date(2026,11,5),env=env)
+        self.assertEqual(after[0],b)
+        self.assertEqual(after[1],datetime(2026,11,5,6,45,tzinfo=JST))
+        self.assertEqual(mail_window(date(2026,11,3),env=env),mail_window(date(2026,11,3),env=TIMING))
+        self.assertEqual(mail_window(date(2026,11,6),env=env),mail_window(date(2026,11,6),env=TIMING))
+
+    def test_override_preserves_collected_history_and_rejects_reinterpretation(self):
+        from bot.morning_ledger import check_window_policy
+        state={'mail_window_policy':dict(TIMING),'days':{'2026-11-03':{}},'window_mode':'continuous'}
+        env={**TIMING,'MORNING_MAIL_WINDOW_OVERRIDES':json.dumps({'2026-11-04':{'start':'14:00','end':'06:30'}})}
+        policy=check_window_policy(state,env)
+        state['mail_window_policy']=policy
+        state['days']['2026-11-04']={}
+        self.assertEqual(check_window_policy(state,env),policy)
+        with self.assertRaises(MorningInputError):check_window_policy(state,TIMING)
+
+    def test_invalid_date_scoped_windows_are_not_silently_ignored(self):
+        for raw in ['null','[]','{"2026-11-04":{"start":"14:00","end":"18:30"}}',
+                    '{"2026-11-04":{"start":"14:00","end":"6:30"}}',
+                    '{"2026-11-31":{"start":"14:00","end":"06:30"}}']:
+            with self.subTest(raw=raw),self.assertRaises(MorningInputError):
+                mail_window(date(2026,11,4),env={**TIMING,'MORNING_MAIL_WINDOW_OVERRIDES':raw})
+
     def test_changeover_is_23_hours_without_gap_or_overlap(self):
         before = mail_window(date(2026,10,20),env=TIMING)
         change = mail_window(date(2026,10,21),env=TIMING)
