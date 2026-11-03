@@ -6,7 +6,7 @@ from datetime import date,datetime,timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from bot.morning import JST, MorningInputError, PLATFORMS, mail_window
+from bot.morning import JST, MorningInputError, PLATFORMS, mail_window, MAIL_RULESET_VERSION
 from bot.morning_ledger import KIND,PROBE_KIND,LedgerStore,run_workday_morning,recount_morning
 from shift_requests import ConversationStore
 
@@ -202,7 +202,7 @@ class LedgerTests(unittest.TestCase):
         self.work('2026-11-07');self.run_day('2026-11-07')
         self.assertIn('メルカリ1件',self.push.call_args.args[1])
         self.assertEqual(self.state()['days']['2026-11-05'],state['days']['2026-11-05'])
-        self.assertEqual(self.state()['days']['2026-11-06']['rules_version'],2)
+        self.assertEqual(self.state()['days']['2026-11-06']['rules_version'],MAIL_RULESET_VERSION)
 
     def test_recount_does_not_send_probe_save_or_move_production_receipts(self):
         self.work('2026-11-05');self.run_day('2026-11-05')
@@ -261,6 +261,32 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(self.run_day('2026-11-05')['status'],'sent')
         self.assertEqual(self.run_day('2026-11-05')['status'],'already_sent')
         self.assertEqual(self.push.call_count,1)
+
+    def test_exact_window_excludes_older_carry_without_losing_pending_notice(self):
+        self.mail['2026-11-05']={'メルカリ':['old']}
+        self.run_day('2026-11-05')
+        self.env['MORNING_MAIL_WINDOW_OVERRIDES']=json.dumps({'2026-11-06':{'start':'14:00','end':'06:30'}})
+        self.env['MORNING_ONE_TIME_NOTICE']=json.dumps({'from_date':'2026-11-05','text':'PENDING NOTICE'})
+        self.mail['2026-11-06']={'メルカリ':['new']}
+        self.work('2026-11-06')
+        with patch('bot.morning_ledger.httpx.Client') as client:
+            client.return_value.__enter__.return_value.post.return_value.status_code=200
+            result=self.run_day('2026-11-06',dry_run=True)
+        self.assertEqual(result['first_day'],'2026-11-06')
+        self.assertEqual(result['counts']['メルカリ'],1)
+        self.assertEqual(result['excluded_earlier_pending_days'],1)
+        self.assertIn('PENDING NOTICE',result['text'])
+        self.assertNotIn('お休み中の未通知分もまとめた',result['text'])
+        self.assertEqual(self.run_day('2026-11-06')['status'],'sent')
+        self.assertEqual(self.state()['days']['2026-11-05']['counts']['メルカリ'],1)
+        self.assertEqual(self.state()['days']['2026-11-05']['excluded_from_report_on'],'2026-11-06')
+        self.work('2026-11-07')
+        self.mail['2026-11-07']={'メルカリ':['old','new','later']}
+        with patch('bot.morning_ledger.httpx.Client') as client:
+            client.return_value.__enter__.return_value.post.return_value.status_code=200
+            result=self.run_day('2026-11-07',dry_run=True)
+        self.assertEqual(result['counts']['メルカリ'],1)
+        self.assertNotIn('PENDING NOTICE',result['text'])
 
 
 if __name__=='__main__':unittest.main()
