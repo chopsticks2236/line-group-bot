@@ -23,7 +23,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 
-from bot.morning_timing import cutoff_time, notification_time
+from bot.morning_timing import cutoff_time, notification_time, mail_window_overrides
 
 JST = timezone(timedelta(hours=9))
 PLATFORMS = ("メルカリ", "ラクマ", "Yahoo!フリマ", "ヤフオク")
@@ -59,6 +59,15 @@ def mail_window(day: date, *, mode=None, env=None) -> tuple[datetime, datetime]:
     try:
         begin = cutoff_time(day - timedelta(days=1), env) if mode == "continuous" else time(9)
         end = cutoff_time(day, env)
+        overrides = mail_window_overrides(env)
+        if overrides and mode != 'continuous':
+            raise ValueError('Date-scoped windows require continuous mode')
+        previous = overrides.get((day-timedelta(days=1)).isoformat())
+        if previous:
+            begin = time.fromisoformat(previous['end'])
+        current = overrides.get(day.isoformat())
+        if current:
+            begin, end = time.fromisoformat(current['start']), time.fromisoformat(current['end'])
     except (TypeError, ValueError) as exc:
         raise MorningInputError("朝の集計締め時刻・切り替え日の設定が不正だよ") from exc
     return (datetime.combine(day - timedelta(days=1), begin, JST),
