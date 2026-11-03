@@ -27,7 +27,7 @@ from bot.morning_timing import cutoff_time, notification_time, mail_window_overr
 
 JST = timezone(timedelta(hours=9))
 PLATFORMS = ("メルカリ", "ラクマ", "Yahoo!フリマ", "ヤフオク")
-MAIL_RULESET_VERSION = 2
+MAIL_RULESET_VERSION = 3
 PEOPLE = {"上元": "上元さん", "小山": "小山さん", "比嘉": "育子さん", "与久田": "与久田さん"}
 SENDERS = {
     "メルカリ": {"no-reply@mercari.jp"},
@@ -275,6 +275,10 @@ def seller_payment_confirmed(platform: str, subject: str, body: str) -> bool:
     text = html.unescape(re.sub(r'<[^>]+>',' ',unicodedata.normalize('NFKC',body)))
     pending = re.search(r'支払い待ち|入金待ち|まだ支払われていません|お支払いが完了するまで.*発送しない',text)
     paid = re.search(r'(?:代金|お支払い|支払い).{0,16}(?:完了しました|がありました|が完了して)',text)
+    # Mercari inserts the buyer's display name between payment and completion.
+    # A long name is not an unpaid order. Keep this exception seller-template-specific.
+    if platform == 'メルカリ' and '商品の発送をお願いします' in text:
+        paid = paid or re.search(r'下記の商品の(?:お)?支払いを[^\r\n]{1,160}?さんが完了しました',text)
     if pending and not paid:
         return False
     if platform == 'メルカリ':
