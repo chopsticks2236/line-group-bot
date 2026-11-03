@@ -182,6 +182,12 @@ class ShiftStoreTests(unittest.TestCase):
 
 
 class MailTests(unittest.TestCase):
+    def test_mercari_paid_seller_template_allows_long_buyer_display_names(self):
+        subject='【メルカリ】「テスト商品」の発送をお願いします'
+        body='下記の商品の支払いをuser_abcdefghijklmnopさんが完了しましたので、\r\n商品の発送をお願いします。\r\n商品ID : m12345678901'
+        self.assertTrue(seller_payment_confirmed('メルカリ',subject,body))
+        self.assertFalse(seller_payment_confirmed('メルカリ',subject,'支払い待ちです。お支払いが完了するまで発送しないでください'))
+
     def test_verified_marketplace_templates_in_either_mailbox(self):
         # Sanitized versions of real seller templates; never real order data.
         fixtures = [
