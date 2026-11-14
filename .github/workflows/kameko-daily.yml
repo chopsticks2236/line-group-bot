@@ -2,6 +2,10 @@ name: Kameko daily schedule
 
 on:
   schedule:
+    # JST 01:53 / 02:53 / 03:53 / 04:53 / 05:53 / 06:53:
+    # independently reserve a backup runner before the morning target.
+    # The wait planner holds a runner until 07:00 and warms Render at 06:58.
+    - cron: "53 16-21 * * *"
     # GitHub's scheduler may delay or thin high-frequency cron jobs. Start
     # several low-frequency runners shortly before each configured JST time;
     # the first one that starts stays alive until the exact minute, while the
@@ -56,6 +60,8 @@ jobs:
 
       - name: Calculate exact-time wait plan
         id: wait-plan
+        env:
+          MORNING_SEND_TIME: "07:00"
         run: python bot/schedule_wait.py >> "$GITHUB_OUTPUT"
 
       - name: Trigger Render scheduler
@@ -92,7 +98,7 @@ jobs:
 
           call_scheduler() {
             curl --fail-with-body --silent --show-error \
-              --retry 5 --retry-all-errors --retry-delay 10 \
+              --retry 8 --retry-all-errors --retry-delay 10 \
               --connect-timeout 20 --max-time 180 --get "${CURL_ARGS[@]}" \
               -H "X-Cron-Secret: ${CRON_SECRET}" "${ENDPOINT}"
             echo
@@ -118,7 +124,7 @@ jobs:
 
           # Render無料版の休止復帰を送信時刻より前に済ませる。
           curl --fail --silent --show-error \
-            --retry 3 --retry-all-errors --retry-delay 10 \
+            --retry 5 --retry-all-errors --retry-delay 10 \
             --connect-timeout 20 --max-time 150 "${BASE_URL}/" >/dev/null \
             || echo "Warm-up request failed; scheduler call will still retry."
 
