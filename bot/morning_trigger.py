@@ -16,6 +16,23 @@ from bot.morning_timing import notification_time
 
 BASE = "https://line-group-bot-r3yl.onrender.com"
 JST = timezone(timedelta(hours=9))
+DELIVERY_VERSION = "early-reserve-retry-v2"
+MAX_WAIT_SECONDS = 5 * 60 * 60 + 30 * 60
+SEND_ATTEMPTS = 8
+RETRY_DELAY_SECONDS = 30
+COMPLETED_STATUSES = {
+    "sent",
+    "already_accepted",
+    "already_sent",
+    "holiday_accumulated",
+    "disabled",
+    "not_started",
+}
+
+
+def send_is_complete(result):
+    """Only stop on a confirmed send or an intentional no-send outcome."""
+    return bool(result.get("ok")) and result.get("status") in COMPLETED_STATUSES
 
 
 def call(path, secret="", method="GET"):
@@ -62,7 +79,7 @@ def main():
     now = datetime.now(JST)
     send_at = notification_time()
     target = now.replace(hour=send_at.hour, minute=send_at.minute, second=0, microsecond=0)
-    if now.hour < 4 or now.hour >= 12:
+    if now.hour >= 12 or (target - now).total_seconds() > MAX_WAIT_SECONDS:
         print("Outside morning runner window; no send")
         return
     print(f"Target: {target.isoformat()}; waiting on GitHub, not keeping Render awake", flush=True)
@@ -72,17 +89,19 @@ def main():
     except Exception:
         print("Pre-target warm-up failed; send call will retry")
     time.sleep(max(0, (target-datetime.now(JST)).total_seconds()))
-    for attempt in range(5):
+    print(f"Calling morning endpoint: {datetime.now(JST).isoformat()}", flush=True)
+    for attempt in range(SEND_ATTEMPTS):
         try:
             result = call("/cron/morning", secret, "POST")
             print(json.dumps({k: result[k] for k in ("ok", "status", "date") if k in result}),flush=True)
-            if result.get("ok"):
+            if send_is_complete(result):
                 return
+            print(f"Morning endpoint is not complete yet; retry {attempt+1}/{SEND_ATTEMPTS}",flush=True)
         except Exception as exc:
             diagnostic_failure(exc)
-            print(f"Morning request failed, attempt {attempt+1}/5",flush=True)
-        if attempt < 4:
-            time.sleep(30)
+            print(f"Morning request failed, attempt {attempt+1}/{SEND_ATTEMPTS}",flush=True)
+        if attempt < SEND_ATTEMPTS - 1:
+            time.sleep(RETRY_DELAY_SECONDS)
     raise SystemExit("Morning notification failed; no unverified success reported")
 
 
