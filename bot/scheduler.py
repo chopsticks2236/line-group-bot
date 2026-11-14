@@ -168,7 +168,9 @@ def run_daily_schedules(
 
     if force_date is None and force_time is None and not force_resend:
         from bot.morning import enabled as morning_enabled, run_morning
-        if morning_enabled():
+        # Evening monthly catch-up calls must not retry an expired morning
+        # window and report the whole scheduler as broken.
+        if morning_enabled() and now.hour < 12:
             morning = run_morning(now=now)
             results.append({"id": "morning_digest_v1", **morning})
     has_errors = any(item.get("status") == "error" or item.get("ok") is False for item in results)
