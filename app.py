@@ -107,6 +107,7 @@ def health():
             "morning_previous_cutoff_time": os.getenv("MORNING_PREVIOUS_CUTOFF_TIME", "07:45"),
             "morning_mail_rules_version": MAIL_RULESET_VERSION,
             "morning_mailbox_scope": "all_marketplaces_in_both_mailboxes",
+            "notification_delivery_version": "early-reserve-retry-v2",
         }
     )
 
